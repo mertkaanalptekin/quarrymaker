@@ -546,7 +546,10 @@ def check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, conf, est, Hb, r
     # 6. confidence
     p6 = paths.checks / "07_confidence.png"
     c = (np.clip(conf[crop], 0, 1) * 255).astype("uint8")
-    fit(Image.fromarray(np.stack([255 - c, c, np.zeros_like(c)], -1))).save(p6)
+    col = np.stack([255 - c, c, np.zeros_like(c)], -1)
+    dim = (rgb[crop].astype(float) * 0.45 + 60).astype("uint8")  # outside the pit: dimmed photo
+    col = np.where(mask[crop][..., None], col, dim)
+    fit(Image.fromarray(col.astype("uint8"))).save(p6)
     out.append(p6)
     _ = T  # keep import for symmetry
     return out

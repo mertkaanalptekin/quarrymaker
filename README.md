@@ -1,5 +1,10 @@
 # Quarry base-terrain pipeline
 
+> **Not a programmer? Start here:** read **[GUIDE.md](GUIDE.md)**, then double-click
+> **`Start Quarry Maker.command`** (Mac) or **`Start Quarry Maker.bat`** (Windows). A simple app
+> opens in your browser: draw your quarry on a map, press "Run next step", and open the results.
+> No terminal and no code needed.
+
 Scripted pipeline that turns an area of interest, a 30 m OpenTopography DEM and
 satellite imagery into:
 

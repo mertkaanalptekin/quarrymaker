@@ -11,3 +11,6 @@ data/reference/*
 __pycache__/
 *.pyc
 *.blend1
+
+# private Python environment made by the launcher
+.venv/

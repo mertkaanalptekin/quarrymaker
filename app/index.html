@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quarry Maker</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  :root {
+    --bg: #f4f2ee; --card: #ffffff; --ink: #23211d; --muted: #6b665d; --line: #dedad2;
+    --accent: #b5561c; --accent-ink: #ffffff; --ok: #2f7d4b; --warn: #a86b00; --bad: #b3261e;
+    --soft: #faf8f4;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 22px 24px 8px; max-width: 1100px; margin: 0 auto; }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { max-width: 1100px; margin: 0 auto; padding: 8px 16px 60px; }
+  section.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+                 padding: 20px 22px; margin: 16px 0; }
+  .step-h { display: flex; align-items: center; gap: 12px; margin: 0 0 6px; }
+  .num { width: 30px; height: 30px; border-radius: 50%; background: var(--ink); color: #fff;
+         display: grid; place-items: center; font-weight: 600; flex: none; }
+  .step-h h2 { margin: 0; font-size: 19px; }
+  .lead { color: var(--muted); margin: 0 0 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button { font: inherit; border: 1px solid var(--line); background: #fff; color: var(--ink);
+           padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+  button:hover { border-color: #b9b3a8; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.05); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input[type=text], input[type=number], input[type=password], select {
+    font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+    color: var(--ink); min-width: 0; }
+  label { color: var(--ink); }
+  #map { height: 460px; border-radius: 10px; border: 1px solid var(--line); margin: 10px 0; background: #dcd8cf; }
+  .map-fallback { display: none; padding: 14px; background: var(--soft); border: 1px dashed var(--line);
+                  border-radius: 10px; margin: 10px 0; color: var(--muted); }
+  .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .grid4 label { font-size: 13px; color: var(--muted); display: block; }
+  .grid4 input { width: 100%; }
+  .info { background: var(--soft); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-size: 14px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .msg { margin-top: 8px; font-size: 14px; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+  .field { margin: 14px 0; }
+  .field > .label { font-weight: 600; margin-bottom: 4px; }
+  .help { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .stages { list-style: none; margin: 12px 0 0; padding: 0; }
+  .stage { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 8px 0; background: #fff; }
+  .stage .top { display: flex; gap: 12px; align-items: baseline; }
+  .stage .badge { font-size: 12.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; flex: none;
+                  background: #ece9e3; color: var(--muted); }
+  .badge.ok { background: #e3f1e7; color: var(--ok); }
+  .badge.failed { background: #f7e1df; color: var(--bad); }
+  .badge.running { background: #fbecd9; color: var(--warn); }
+  .badge.outdated { background: #fbecd9; color: var(--warn); }
+  .stage .t { font-weight: 600; }
+  .stage .about { color: var(--muted); font-size: 14px; }
+  .stage ul { margin: 8px 0 0; padding-left: 18px; font-size: 13.5px; color: #3d3a34; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .thumbs figure { margin: 0; width: 170px; }
+  .thumbs img { width: 170px; height: 110px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line);
+                cursor: zoom-in; background: #eee; display: block; }
+  .thumbs figcaption { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+  .alert { border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+  .alert.bad { background: #fbe9e7; border: 1px solid #efc4bf; }
+  .alert.note { background: #fdf3e3; border: 1px solid #f0d9b0; }
+  .alert b { display: block; margin-bottom: 2px; }
+  pre.log { background: #1f1e1b; color: #e9e5dc; padding: 10px; border-radius: 8px; max-height: 320px;
+            overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .results { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+  .res { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; }
+  .res .muted { font-size: 13px; margin: 2px 0 8px; overflow-wrap: anywhere; }
+  .spinner { width: 14px; height: 14px; border: 2px solid #e2c9b4; border-top-color: var(--accent);
+             border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #lightbox { position: fixed; inset: 0; background: rgba(20,18,15,.85); display: none; place-items: center;
+              z-index: 9999; cursor: zoom-out; padding: 20px; }
+  #lightbox img { max-width: 100%; max-height: 100%; border-radius: 6px; background: #fff; }
+  .key-ok { color: var(--ok); } .key-no { color: var(--bad); }
+  @media (max-width: 700px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } #map { height: 360px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quarry Maker</h1>
+  <p>Builds a true-scale 3D model of your quarry for Blender, Rhino and Gaea. Follow the four steps.</p>
+</header>
+<main>
+  <div id="fatal" class="alert bad" style="display:none"></div>
+
+  <!-- STEP 1 -->
+  <section class="card">
+    <div class="step-h"><div class="num">1</div><h2>Your quarry</h2></div>
+    <p class="lead">Find your quarry on the map, then draw a rectangle around it. Include some of the
+      surroundings; an extra margin (<span id="buf-lead">500</span> m) is added on every side automatically.</p>
+    <div class="row">
+      <input type="text" id="goto" placeholder="Paste coordinates from Google Maps, e.g. 40.31, 27.41" style="flex:1; min-width:240px">
+      <button id="goto-btn">Go there</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="draw-area">Draw area</button>
+      <button id="draw-pit">Trace pit outline (optional)</button>
+      <button id="pit-undo" style="display:none">Undo last point</button>
+      <button id="pit-finish" style="display:none">Finish outline</button>
+      <button id="pit-clear">Remove pit outline</button>
+    </div>
+    <div id="map-tip" class="help"></div>
+    <div id="map"></div>
+    <div id="map-fallback" class="map-fallback">The map could not load (no internet connection to the map
+      service?). You can still type the four corners below.</div>
+    <details>
+      <summary>Corners as numbers (you can also type them here)</summary>
+      <div class="grid4" style="margin-top:8px">
+        <div><label>West (longitude)</label><input type="number" step="0.000001" id="w"></div>
+        <div><label>South (latitude)</label><input type="number" step="0.000001" id="s"></div>
+        <div><label>East (longitude)</label><input type="number" step="0.000001" id="e"></div>
+        <div><label>North (latitude)</label><input type="number" step="0.000001" id="n"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>Extra margin around the area: <input type="number" id="buffer" min="0" step="50" style="width:90px"> m</label>
+      </div>
+    </details>
+    <div id="area-info" class="info muted">No area yet.</div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="save-area">Save area</button>
+      <span id="area-msg" class="msg"></span>
+    </div>
+    <p class="help">The pit outline is optional. Trace it if the automatic step 7 picks up the wrong area
+      (for example bright fields next to the quarry). Click around the edge of the pit, then press "Finish outline".</p>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="card">
+    <div class="step-h"><div class="num">2</div><h2>Settings</h2></div>
+    <p class="lead">Three things the program cannot guess.</p>
+
+    <div class="field">
+      <div class="label">Where is Blender on this computer?</div>
+      <div class="row">
+        <select id="blender-select" style="flex:1; min-width:240px"></select>
+      </div>
+      <input type="text" id="blender-path" placeholder="Full path to the Blender program" style="width:100%; margin-top:6px; display:none">
+      <div class="help">Pick the detected Blender. If none is found, install Blender from blender.org, or choose
+        "Other" and type its location (Mac: /Applications/Blender.app/Contents/MacOS/Blender,
+        Windows: C:\Program Files\Blender Foundation\Blender 4.2\blender.exe).</div>
+    </div>
+
+    <div class="field">
+      <div class="label">OpenTopography key</div>
+      <div class="row">
+        <input type="password" id="api-key" placeholder="Paste your key" style="flex:1; min-width:240px" autocomplete="off">
+        <button id="use-key">Use this key</button>
+      </div>
+      <div id="key-status" class="help"></div>
+      <div class="help">Needed to download the height data. Free at opentopography.org (My Account &rarr; Request API key).
+        For your safety the key is <b>only kept while this app is open</b>; it is never saved to a file.
+        You will be asked again next time.</div>
+    </div>
+
+    <div class="field">
+      <div class="label">Bench height</div>
+      <div class="help" style="margin-top:0">Quarry walls are cut as giant steps. The bench height is how tall one step is
+        (usually 10&ndash;15 m).</div>
+      <div style="margin-top:6px">
+        <label><input type="radio" name="bh" value="auto" id="bh-auto"> I don't know &mdash; calculate it from the image</label><br>
+        <label><input type="radio" name="bh" value="known" id="bh-known"> I know it:
+          <input type="number" id="bh-value" min="2" max="40" step="0.5" style="width:90px"> m</label>
+      </div>
+      <div class="help">Knowing it gives more accurate bench levels. Ask the quarry operator, look in the permit
+        documents, or measure in Google Earth Pro: hover over one bench floor and the next one, and subtract the
+        elevations shown at the bottom right.</div>
+      <label style="display:block; margin-top:8px"><input type="checkbox" id="terraces-on"> Calculate the benches (step 7)</label>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="save-settings">Save settings</button>
+      <span id="settings-msg" class="msg"></span>
+    </div>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="card">
+    <div class="step-h"><div class="num">3</div><h2>Build the model</h2></div>
+    <p class="lead">Run one step at a time and look at the check images after each step (recommended), or run
+      everything at once. Downloads are kept, so running again is quick.</p>
+    <div class="row">
+      <button class="primary" id="run-next">Run next step</button>
+      <button id="run-all">Run all remaining steps</button>
+      <span id="run-status" class="muted"></span>
+    </div>
+    <div id="run-error" class="alert bad" style="display:none"></div>
+    <div id="run-note" class="alert note" style="display:none"></div>
+    <ul class="stages" id="stages"></ul>
+    <details id="log-box">
+      <summary>Show technical details (log)</summary>
+      <pre class="log" id="log"></pre>
+    </details>
+  </section>
+
+  <!-- STEP 4 -->
+  <section class="card">
+    <div class="step-h"><div class="num">4</div><h2>Your results</h2></div>
+    <p class="lead">Open the finished files. Blender files open in your Blender; folders open in your file browser.</p>
+    <div class="results" id="results"></div>
+    <p class="help">The "Quarry with calculated benches" model is an <b>interpretation</b> made from the satellite image;
+      the "Measured terrain" is the height data exactly as measured. Both use the same coordinates and work with
+      BlenderGIS.</p>
+  </section>
+</main>
+<div id="lightbox"><img alt=""></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = (id) => document.getElementById(id);
+let S = null;            // last state
+let logN = 0;
+let map = null, areaRect = null, pitLine = null, pitPoly = null;
+let mode = null;          // "area" | "pit" | null
+let firstCorner = null, tempRect = null, pitPts = [];
+let dirtyArea = false, dirtySettings = false;
+
+async function api(path, body) {
+  const opt = { headers: { "X-Token": TOKEN } };
+  if (body !== undefined) { opt.method = "POST"; opt.body = JSON.stringify(body);
+                            opt.headers["Content-Type"] = "application/json"; }
+  const r = await fetch(path + (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(TOKEN), opt);
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (!r.ok && !j.error) j.error = "The app did not answer (HTTP " + r.status + ").";
+  return j;
+}
+function fileUrl(p) { return "/files/" + p.split("/").map(encodeURIComponent).join("/") + "?t=" + encodeURIComponent(TOKEN); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function setMsg(el, text, ok) { el.textContent = text || ""; el.className = "msg " + (text ? (ok ? "ok" : "bad") : ""); }
+
+/* ---------------- map ---------------- */
+function initMap() {
+  if (typeof L === "undefined") { $("map").style.display = "none"; $("map-fallback").style.display = "block"; return; }
+  map = L.map("map", { zoomControl: true }).setView([39.0, 35.0], 5);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "Esri World Imagery &mdash; Esri, Maxar, Earthstar Geographics, GIS User Community" }).addTo(map);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, opacity: 0.8 }).addTo(map);
+  map.on("click", onMapClick);
+  map.on("mousemove", (ev) => {
+    if (mode === "area" && firstCorner) {
+      const b = L.latLngBounds(firstCorner, ev.latlng);
+      if (!tempRect) tempRect = L.rectangle(b, { color: "#ffb15c", weight: 2, dashArray: "6 4", fill: false }).addTo(map);
+      else tempRect.setBounds(b);
+    }
+  });
+  map.on("dblclick", (ev) => { if (mode === "pit") { L.DomEvent.stop(ev); finishPit(); } });
+}
+function setMode(m) {
+  mode = m; firstCorner = null;
+  if (tempRect) { map.removeLayer(tempRect); tempRect = null; }
+  $("draw-area").classList.toggle("active", m === "area");
+  $("draw-pit").classList.toggle("active", m === "pit");
+  $("pit-undo").style.display = m === "pit" ? "" : "none";
+  $("pit-finish").style.display = m === "pit" ? "" : "none";
+  if (map) { map.getContainer().style.cursor = m ? "crosshair" : ""; m === "pit" ? map.doubleClickZoom.disable() : map.doubleClickZoom.enable(); }
+  $("map-tip").textContent = m === "area" ? "Click one corner of the area, then the opposite corner."
+    : m === "pit" ? "Click points around the pit edge. Press 'Finish outline' (or double-click) when you are back at the start." : "";
+}
+function onMapClick(ev) {
+  if (mode === "area") {
+    if (!firstCorner) { firstCorner = ev.latlng; return; }
+    const b = L.latLngBounds(firstCorner, ev.latlng);
+    setArea(b.getWest(), b.getSouth(), b.getEast(), b.getNorth());
+    dirtyArea = true; setMode(null);
+  } else if (mode === "pit") {
+    pitPts.push([ev.latlng.lat, ev.latlng.lng]); drawPitTemp();
+  }
+}
+function drawPitTemp() {
+  if (pitLine) map.removeLayer(pitLine);
+  pitLine = L.polyline(pitPts, { color: "#ff4d3d", weight: 2 }).addTo(map);
+}
+function finishPit() {
+  if (pitPts.length < 3) { $("map-tip").textContent = "An outline needs at least 3 points."; return; }
+  if (pitLine) { map.removeLayer(pitLine); pitLine = null; }
+  showPit(pitPts); dirtyArea = true; setMode(null); updateAreaInfo();
+}
+function showPit(latlngs) {
+  if (pitPoly) map.removeLayer(pitPoly);
+  pitPoly = latlngs ? L.polygon(latlngs, { color: "#ff4d3d", weight: 2, fillOpacity: 0.12 }).addTo(map) : null;
+}
+function setArea(w, s, e, n) {
+  $("w").value = (+w).toFixed(6); $("s").value = (+s).toFixed(6); $("e").value = (+e).toFixed(6); $("n").value = (+n).toFixed(6);
+  drawArea(); updateAreaInfo();
+}
+function drawArea() {
+  const w = +$("w").value, s = +$("s").value, e = +$("e").value, n = +$("n").value;
+  if (!map) return;
+  if (areaRect) { map.removeLayer(areaRect); areaRect = null; }
+  if ([w, s, e, n].every(v => isFinite(v) && v !== 0) && w < e && s < n)
+    areaRect = L.rectangle([[s, w], [n, e]], { color: "#ffcc4d", weight: 3, fill: false }).addTo(map);
+}
+function updateAreaInfo() {
+  const w = +$("w").value, s = +$("s").value, e = +$("e").value, n = +$("n").value, buf = +$("buffer").value || 0;
+  if (!([w, s, e, n].every(isFinite)) || !(w < e && s < n)) { $("area-info").textContent = "No area yet."; return; }
+  const lat = (s + n) / 2, cos = Math.cos(lat * Math.PI / 180);
+  const wm = (e - w) * 111320 * cos, hm = (n - s) * 110540;
+  const z = S?.config?.zoom ?? 17, maxT = S?.config?.max_tiles ?? 3000;
+  const tile = 256 * 156543.03 * cos / Math.pow(2, z);
+  const tiles = (Math.ceil((wm + 2 * buf) / tile) + 1) * (Math.ceil((hm + 2 * buf) / tile) + 1);
+  const zone = Math.floor(((w + e) / 2 + 180) / 6) + 1;
+  let t = `Area ${(wm / 1000).toFixed(2)} &times; ${(hm / 1000).toFixed(2)} km (plus ${buf} m margin). `
+        + `Coordinate system: UTM zone ${zone}${lat >= 0 ? "N" : "S"} (metres). About ${tiles} satellite tiles.`;
+  if (tiles > maxT) t += ` <b style="color:var(--bad)">Too large: please draw a smaller area (limit ${maxT} tiles).</b>`;
+  if (pitPoly) t += " Pit outline: traced.";
+  $("area-info").innerHTML = t; $("area-info").classList.remove("muted");
+}
+function gotoCoords() {
+  const m = $("goto").value.match(/(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) { $("map-tip").textContent = "Could not read the coordinates. Example: 40.31, 27.41"; return; }
+  let a = +m[1], b = +m[2];
+  if (Math.abs(a) > 90 && Math.abs(b) <= 90) [a, b] = [b, a];   // given as lon, lat
+  if (map) map.setView([a, b], 15);
+  $("map-tip").textContent = "Now press 'Draw area' and click two opposite corners around the quarry.";
+}
+
+/* ---------------- state rendering ---------------- */
+function renderConfig() {
+  const c = S.config;
+  if (!dirtyArea) {
+    for (const k of ["w", "s", "e", "n"]) {
+      const v = c.aoi[{ w: "west", s: "south", e: "east", n: "north" }[k]];
+      $(k).value = v == null ? "" : v;
+    }
+    $("buffer").value = c.buffer_m ?? 500;
+    $("buf-lead").textContent = c.buffer_m ?? 500;
+    drawArea();
+    if (map && c.pit && c.pit.features && c.pit.features.length) {
+      const ring = c.pit.features[0].geometry.coordinates[0].map(p => [p[1], p[0]]);
+      showPit(ring);
+    } else if (map) showPit(null);
+    if (map && areaRect && !renderConfig.fitted) { map.fitBounds(areaRect.getBounds().pad(0.3)); renderConfig.fitted = true; }
+    updateAreaInfo();
+  }
+  if (!dirtySettings) {
+    const sel = $("blender-select"); sel.innerHTML = "";
+    const opts = [...S.blender_detected];
+    if (c.blender_path && !opts.includes(c.blender_path)) opts.unshift(c.blender_path);
+    for (const p of opts) sel.add(new Option(p, p));
+    sel.add(new Option(opts.length ? "Other location..." : "Not found - type the location...", "__other"));
+    sel.value = c.blender_path && opts.includes(c.blender_path) ? c.blender_path : (opts[0] || "__other");
+    $("blender-path").style.display = sel.value === "__other" ? "" : "none";
+    if (sel.value === "__other") $("blender-path").value = c.blender_path || "";
+    const bh = c.bench_height_m;
+    const auto = bh == null || String(bh).toLowerCase() === "auto";
+    $("bh-auto").checked = auto; $("bh-known").checked = !auto; $("bh-value").value = auto ? "" : bh;
+    $("terraces-on").checked = c.terraces_enabled !== false;
+  }
+  const k = S.key;
+  $("key-status").innerHTML = k.in_app ? '<span class="key-ok">&#10003; Key is set for this session.</span>'
+    : k.in_env ? '<span class="key-ok">&#10003; Key found in your computer settings (OPENTOPO_API_KEY).</span>'
+    : '<span class="key-no">No key yet.</span>';
+}
+const LABEL = { ok: "Done", failed: "Needs attention", todo: "Not started", outdated: "Settings changed - run again", running: "Running..." };
+function renderStages() {
+  const ul = $("stages"); ul.innerHTML = "";
+  const job = S.job;
+  for (const st of S.stages) {
+    let status = st.status;
+    if (job.running && job.stage === st.id) status = "running";
+    const li = document.createElement("li"); li.className = "stage";
+    let inner = `<div class="top"><span class="badge ${status}">${status === "running" ? '<span class="spinner"></span> ' : ""}${LABEL[status] || status}</span>
+      <div><div class="t">${+st.id === 0 ? "Check setup" : "Step " + (+st.id) + ": " + esc(st.title)}</div>
+      <div class="about">${esc(st.about)}</div></div></div>`;
+    if (st.missing && st.missing.length) inner += "<ul>" + st.missing.map(m => `<li style="color:var(--bad)">${esc(m)}</li>`).join("") + "</ul>";
+    if (st.warnings && st.warnings.length) inner += "<ul>" + st.warnings.map(m => `<li style="color:var(--warn)">${esc(m)}</li>`).join("") + "</ul>";
+    if (st.summary && st.summary.length) inner += "<details><summary>What happened</summary><ul>" + st.summary.map(x => `<li>${esc(x)}</li>`).join("") + "</ul></details>";
+    if (st.check_images && st.check_images.length)
+      inner += '<div class="thumbs">' + st.check_images.map(p => { const c = caption(p);
+        return `<figure><img loading="lazy" src="${fileUrl(p)}" alt="${esc(c)}"><figcaption>${esc(c)}</figcaption></figure>`; }).join("") + "</div>";
+    li.innerHTML = inner; ul.appendChild(li);
+  }
+  ul.querySelectorAll(".thumbs img").forEach(img => img.addEventListener("click", () => {
+    $("lightbox").querySelector("img").src = img.src; $("lightbox").style.display = "grid"; }));
+  $("run-next").disabled = $("run-all").disabled = job.running;
+  $("run-status").innerHTML = job.running ? `<span class="spinner"></span> Working on ${esc(stageTitle(job.stage))}... this can take a few minutes.` : "";
+  const err = $("run-error");
+  if (job.last_error && !job.running) {
+    err.style.display = "block";
+    err.innerHTML = `<b>The last step stopped.</b>${esc(job.last_error)}<div style="margin-top:6px"><b style="display:inline">What to do:</b> ${esc(job.hint)}</div>`;
+  } else err.style.display = "none";
+  const note = $("run-note");
+  if (!job.running && !job.last_error && job.last_stage_done) {
+    const st = S.stages.find(x => x.id === job.last_stage_done);
+    const next = S.stages.find(x => x.status !== "ok" && x.id !== "00");
+    note.style.display = "block";
+    const imgs = st && st.check_images && st.check_images.length;
+    note.innerHTML = `<b>${esc(stageTitle(job.last_stage_done))} is done.</b> ` +
+      (imgs ? "Look at its check images below (click to enlarge). " : "") +
+      (next ? `${imgs ? "When they look right, press" : "Press"} "Run next step" (${esc(stageTitle(next.id))}).`
+            : "All steps are done. Your files are in step 4.");
+  } else note.style.display = "none";
+}
+const CAPTIONS = {
+  "01_dem_raw_hillshade": "Height data as shaded relief. Is the quarry inside, and are there no holes?",
+  "02_imagery_preview": "Satellite image of the area. Is it the right place?",
+  "03_hillshade_over_ortho": "Relief laid over the image. Hills and pit should line up with the photo.",
+  "03_elevation_histogram": "How much of the area lies at each height.",
+  "04_blender_preview": "First look at the Blender terrain.",
+  "05_gaea_package": "Gaea heightmap and colour map. The red box is the real area; outside it is padding.",
+  "06_render_top": "Blender render from above.",
+  "06_render_oblique": "Blender render from the side.",
+  "06_top_vs_reference": "Render next to your Google Earth image (if you added one).",
+  "07_pit_mask_and_classes": "Pit found: blue = floor, yellow = bench floors, red = bench faces. Does it cover the quarry?",
+  "07_contour_edges": "Satellite image and the bench edges found in it.",
+  "07_bench_height_spectrum": "How the bench height was found: the tallest red peak marks it.",
+  "07_hillshade_measured_vs_terraced": "Left: measured terrain. Right: with calculated benches.",
+  "07_profile": "Cross-section through the pit: grey = measured, red = with benches.",
+  "07_confidence": "How sure the program is: green = clear benches in the image, red = unsure.",
+  "07_render_oblique": "Blender render of the quarry with benches.",
+  "07_render_top": "Blender render from above, with benches.",
+};
+function caption(p) { const n = p.split("/").pop().replace(/\.[a-z]+$/i, ""); return CAPTIONS[n] || n.replace(/_/g, " "); }
+function stageTitle(id) { const st = S?.stages?.find(x => x.id === id); return st ? (+id === 0 ? "Check setup" : `Step ${+id}: ${st.title}`) : ""; }
+function renderResults() {
+  const box = $("results"); box.innerHTML = "";
+  for (const r of S.results) {
+    const d = document.createElement("div"); d.className = "res";
+    const verb = r.kind === "blend" ? "Open in Blender" : r.kind === "folder" ? "Open folder" : "Open";
+    d.innerHTML = `<div><b>${esc(r.label)}</b></div><div class="muted">${r.exists ? esc(r.path) : "Not made yet"}</div>
+      <button ${r.exists ? "" : "disabled"}>${verb}</button>`;
+    d.querySelector("button").addEventListener("click", async () => {
+      const j = await api("/api/open", { path: r.path });
+      if (j.error) alert(j.error);
+    });
+    box.appendChild(d);
+  }
+}
+async function refresh() {
+  const s = await api("/api/state");
+  if (s.error) { $("fatal").style.display = "block"; $("fatal").textContent = s.error; return; }
+  $("fatal").style.display = "none";
+  const key = JSON.stringify([s.stages, s.job, s.results, s.run_id]);
+  S = s; renderConfig();
+  if (key !== refresh.last) { renderStages(); renderResults(); refresh.last = key; }
+  if ($("log-box").open || S.job.running) await pullLog();
+}
+async function pullLog() {
+  const j = await api("/api/log?since=" + logN);
+  if (j.lines && j.lines.length) {
+    const pre = $("log"); pre.textContent += j.lines.join("\n") + "\n"; logN = j.n;
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+/* ---------------- actions ---------------- */
+$("goto-btn").onclick = gotoCoords;
+$("goto").addEventListener("keydown", e => { if (e.key === "Enter") gotoCoords(); });
+$("draw-area").onclick = () => { if (!map) return; setMode(mode === "area" ? null : "area"); };
+$("draw-pit").onclick = () => { if (!map) return; if (mode === "pit") { setMode(null); return; } pitPts = []; setMode("pit"); };
+$("pit-undo").onclick = () => { pitPts.pop(); drawPitTemp(); };
+$("pit-finish").onclick = finishPit;
+$("pit-clear").onclick = () => { showPit(null); pitPts = []; dirtyArea = true; updateAreaInfo(); };
+for (const id of ["w", "s", "e", "n", "buffer"]) $(id).addEventListener("input", () => { dirtyArea = true; drawArea(); updateAreaInfo(); });
+$("save-area").onclick = async () => {
+  const body = { aoi: { west: $("w").value, south: $("s").value, east: $("e").value, north: $("n").value },
+                 buffer_m: $("buffer").value || 0 };
+  if (pitPoly) {
+    const ring = pitPoly.getLatLngs()[0].map(p => [+p.lng.toFixed(7), +p.lat.toFixed(7)]);
+    ring.push(ring[0]);
+    body.pit = { type: "FeatureCollection", features: [{ type: "Feature", properties: { source: "traced in Quarry Maker" },
+                 geometry: { type: "Polygon", coordinates: [ring] } }] };
+  } else body.pit = null;
+  const j = await api("/api/settings", body);
+  setMsg($("area-msg"), j.error || "Area saved.", !j.error);
+  if (!j.error) { dirtyArea = false; refresh(); }
+};
+$("blender-select").onchange = () => { dirtySettings = true; $("blender-path").style.display = $("blender-select").value === "__other" ? "" : "none"; };
+for (const id of ["blender-path", "bh-value"]) $(id).addEventListener("input", () => { dirtySettings = true; if (id === "bh-value") $("bh-known").checked = true; });
+for (const id of ["bh-auto", "bh-known", "terraces-on"]) $(id).addEventListener("change", () => { dirtySettings = true; });
+$("use-key").onclick = async () => {
+  const j = await api("/api/settings", { api_key: $("api-key").value });
+  $("api-key").value = "";
+  setMsg($("settings-msg"), j.error || "Key set for this session.", !j.error); refresh();
+};
+$("save-settings").onclick = async () => {
+  const sel = $("blender-select").value;
+  const body = { blender_path: sel === "__other" ? $("blender-path").value : sel,
+                 bench_height_m: $("bh-auto").checked ? "auto" : $("bh-value").value,
+                 terraces_enabled: $("terraces-on").checked };
+  if ($("api-key").value) body.api_key = $("api-key").value;
+  const j = await api("/api/settings", body);
+  $("api-key").value = "";
+  setMsg($("settings-msg"), j.error || "Settings saved.", !j.error);
+  if (!j.error) { dirtySettings = false; refresh(); }
+};
+async function run(mode) {
+  if (dirtyArea || dirtySettings) {
+    if (!confirm("You have unsaved changes in step 1 or 2. Run anyway with the saved settings?")) return;
+  }
+  const j = await api("/api/run", { mode });
+  if (j.error) { $("run-status").textContent = j.error; return; }
+  setTimeout(refresh, 300);
+}
+$("run-next").onclick = () => run("next");
+$("run-all").onclick = () => run("all");
+$("lightbox").onclick = () => { $("lightbox").style.display = "none"; };
+$("log-box").addEventListener("toggle", () => { if ($("log-box").open) pullLog(); });
+
+initMap();
+refresh();
+setInterval(() => { if (S && (S.job.running || $("log-box").open)) refresh(); }, 1500);
+setInterval(() => { if (S && !S.job.running) refresh(); }, 8000);
+</script>
+</body>
+</html>

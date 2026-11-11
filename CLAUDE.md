@@ -222,6 +222,18 @@ Calculates the quarry's benches from the satellite image with the help of the DE
 - Log everything to `logs/run_vNNN.log`.
 - Stop at the first failed stage and print a short explanation of the error.
 
+## User app (`app/`, launchers)
+The user is an architect, not a programmer, so every feature must be reachable from the app.
+- `Start Quarry Maker.command` (Mac/Linux) and `Start Quarry Maker.bat` (Windows) create a private `.venv`, install `requirements.txt` on first start, and run `app/quarry_app.py`.
+- `app/quarry_app.py` is a local web app: standard library only, bound to 127.0.0.1, with a per-launch token. It lets the user:
+  - draw the area and the pit outline on a map (Leaflet + Esri imagery);
+  - pick Blender (auto-detected) and set the bench height;
+  - enter the OpenTopography key, which stays in memory only and is passed to the pipeline as `OPENTOPO_API_KEY`, never written;
+  - run one stage at a time (checkpoints with captioned check images) or all stages;
+  - open the results in Blender or the file browser.
+- `app/config_io.py` edits only the managed values in `config.yaml`, keeping all comments. Saving an area also sets `crs_epsg` to the area's UTM zone.
+- `GUIDE.md` is the plain-language user guide. Keep it, the app's step descriptions and the error hints in sync with the pipeline.
+
 ## Done when
 - Running `python run_pipeline.py --auto` from a clean checkout, with a filled `config.yaml`, produces every output above with all checks passing.
 - Opening `quarry_base.blend` shows the textured, true-scale terrain at the correct BlenderGIS georeference.

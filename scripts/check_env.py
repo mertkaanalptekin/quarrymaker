@@ -118,8 +118,8 @@ def main(argv=None) -> int:
     # Blender -----------------------------------------------------------
     blender, where = common.find_blender(cfg or {})
     if not blender:
-        missing.append("Blender path is not set. Set blender.path in config.yaml or the "
-                       "BLENDER_PATH environment variable.")
+        missing.append("Blender path is not set. Choose Blender in the Quarry Maker app (step 2), "
+                       "or set blender.path in config.yaml.")
         print("Blender: NOT CONFIGURED")
     else:
         print(f"Blender: {blender}  (from {where})")
@@ -155,9 +155,10 @@ def main(argv=None) -> int:
         if cached:
             warnings.append(f"OPENTOPO_API_KEY is not set, but the DEM is cached ({cached}).")
         else:
-            missing.append("OPENTOPO_API_KEY is not set. Get a free key at "
-                           "https://portal.opentopography.org (My Account > Request API key) "
-                           "and export it in your shell; never put it in a file.")
+            missing.append("The OpenTopography key is not set. Get a free key at "
+                           "https://portal.opentopography.org (My Account > Request API key) and "
+                           "enter it in the Quarry Maker app (step 2), or set the OPENTOPO_API_KEY "
+                           "environment variable. Never put it in a file.")
 
     # Report ------------------------------------------------------------
     report["missing"] = missing
