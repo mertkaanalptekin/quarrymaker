@@ -3,6 +3,9 @@ rem Quarry Maker - double-click this file to start (Windows).
 rem First start: installs what the program needs into a ".venv" folder here
 rem (a few minutes, needs internet). After that it starts in seconds.
 cd /d "%~dp0"
+rem use UTF-8 for all text (folder names with Turkish or other non-English letters)
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 set "PY="
 where py >nul 2>nul && set "PY=py -3"

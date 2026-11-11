@@ -162,7 +162,7 @@ def main(argv=None) -> int:
     gmeta_path = out / "gaea_meta.json"
     common.write_json(gmeta_path, gmeta)
     readme = out / "README_gaea.md"
-    readme.write_text(gaea_readme(gmeta, meta))
+    readme.write_text(gaea_readme(gmeta, meta), encoding="utf-8")
 
     # Check image: heightmap + colour map with the data area outlined.
     prev = paths.checks / "05_gaea_package.png"

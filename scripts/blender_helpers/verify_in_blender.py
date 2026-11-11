@@ -46,7 +46,7 @@ def render(cam_name, out, long_px, samples, aspect=None):
 
 
 def main():
-    job = json.loads(Path(job_path()).read_text())
+    job = json.loads(Path(job_path()).read_text(encoding="utf-8"))
     res = {}
     try:
         bpy.ops.wm.open_mainfile(filepath=job["blend"])
@@ -82,7 +82,7 @@ def main():
         import traceback
         res["error"] = f"{type(e).__name__}: {e}"
         res["traceback"] = traceback.format_exc()
-    Path(job["result"]).write_text(json.dumps(res, indent=2))
+    Path(job["result"]).write_text(json.dumps(res, indent=2), encoding="utf-8")
 
 
 main()

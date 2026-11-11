@@ -216,7 +216,7 @@ def main(argv=None) -> int:
         report = paths.base / f"report_rerun_{time.strftime('%Y%m%d_%H%M%S')}.md"
         log.info("report.md exists (write-once); writing %s", report.name)
     report.write_text(make_report(paths, cfg, meta, gm, br, C, rmse, rmse_cells, ref_note,
-                                  [render_top, render_obl, side]))
+                                  [render_top, render_obl, side]), encoding="utf-8")
 
     summary = [f"{'PASS' if c['ok'] else 'FAIL'}: {c['name']} - {c['detail']}" for c in C.items]
     summary.append(f"Gaea RMSE {rmse * 1000:.3f} mm on the Gaea grid; "

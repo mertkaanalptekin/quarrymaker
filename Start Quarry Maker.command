@@ -3,6 +3,7 @@
 # First start: installs what the program needs into a ".venv" folder here
 # (a few minutes, needs internet). After that it starts in seconds.
 cd "$(dirname "$0")" || exit 1
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 
 pause_exit() { echo; read -r -p "Press Enter to close this window." _; exit 1; }
 

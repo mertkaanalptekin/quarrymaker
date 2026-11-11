@@ -13,6 +13,7 @@ failed stage.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -30,8 +31,9 @@ def run_stage(stage: str, config: str, run_id: str | None, force: bool) -> tuple
         cmd += ["--run", run_id]
         if force:
             cmd.append("--force")
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")  # same text encoding everywhere
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1)
+                            encoding="utf-8", errors="replace", bufsize=1, env=env)
     lines = []
     for line in proc.stdout:
         sys.stdout.write(line)

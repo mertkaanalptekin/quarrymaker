@@ -20,6 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Never crash on printing a character the console cannot show (e.g. a Turkish
+# folder name in a Windows console with another code page): print '?' instead.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 DEFAULT_CONFIG = PROJECT_ROOT / "config.yaml"
 
 # BlenderGIS scene keys, taken from BlenderGIS geoscene.py (class SK):
@@ -212,7 +220,7 @@ def resolve_run_id(cfg: dict, new_run: bool = False) -> str:
             raise PipelineError(f"run_id must be 'auto' or like 'v001', got {wanted!r}")
         state = root / "terrain" / "00_base" / wanted / "run.json"
         if state.exists():
-            old = json.loads(state.read_text())
+            old = json.loads(state.read_text(encoding="utf-8"))
             if old.get("config_hash") != h:
                 raise PipelineError(
                     f"Run {wanted} already exists with a different config "
@@ -224,7 +232,7 @@ def resolve_run_id(cfg: dict, new_run: bool = False) -> str:
     if runs and not new_run:
         latest = runs[-1]
         state = root / "terrain" / "00_base" / latest / "run.json"
-        if state.exists() and json.loads(state.read_text()).get("config_hash") == h:
+        if state.exists() and json.loads(state.read_text(encoding="utf-8")).get("config_hash") == h:
             return latest
     n = int(runs[-1][1:]) + 1 if runs else 1
     return f"v{n:03d}"
@@ -236,7 +244,7 @@ def check_run_matches(cfg: dict, run_id: str) -> None:
         raise PipelineError(f"Run ID must look like v001, got {run_id!r}")
     state = Path(cfg["_root"]) / "terrain" / "00_base" / run_id / "run.json"
     if state.exists():
-        old = json.loads(state.read_text()).get("config_hash")
+        old = json.loads(state.read_text(encoding="utf-8")).get("config_hash")
         if old != config_hash(cfg):
             raise PipelineError(
                 f"Run {run_id} was made with a different config (hash {old} vs "
@@ -318,7 +326,7 @@ def write_json(path: Path, data) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=_json_default))
+    tmp.write_text(json.dumps(data, indent=2, default=_json_default), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -337,7 +345,7 @@ def _json_default(o):
 
 
 def read_json(path: Path):
-    return json.loads(Path(path).read_text())
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def rel(paths: Paths, p) -> str:

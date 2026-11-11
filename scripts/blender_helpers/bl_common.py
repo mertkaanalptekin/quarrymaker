@@ -252,14 +252,14 @@ def export_obj(obj, path: Path, texture_name: str):
                           path_mode="STRIP", apply_modifiers=True)
     mtl = path.with_suffix(".mtl")
     if mtl.exists():
-        lines = [ln for ln in mtl.read_text().splitlines() if not ln.startswith("map_Kd")]
+        lines = [ln for ln in mtl.read_text(encoding="utf-8").splitlines() if not ln.startswith("map_Kd")]
         fixed, done = [], False
         for ln in lines:
             fixed.append(ln)
             if ln.startswith("newmtl") and not done:
                 fixed.append(f"map_Kd {texture_name}")
                 done = True
-        mtl.write_text("\n".join(fixed) + "\n")
+        mtl.write_text("\n".join(fixed) + "\n", encoding="utf-8")
 
 
 def export_fbx(obj, path: Path):

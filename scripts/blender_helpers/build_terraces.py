@@ -29,8 +29,8 @@ def job_path():
 
 
 def build(job, log):
-    meta = json.loads(Path(job["meta"]).read_text())
-    prm = json.loads(Path(job["params"]).read_text())
+    meta = json.loads(Path(job["meta"]).read_text(encoding="utf-8"))
+    prm = json.loads(Path(job["params"]).read_text(encoding="utf-8"))
     root = Path(job["checks_dir"]).parent.parent
     blend = Path(job["blend"])
     ext = meta["extent"]
@@ -75,7 +75,7 @@ def build(job, log):
             f"- origin_x = {ox:.1f}, origin_y = {oy:.1f} ({meta['crs']})\n"
             f"- bench height {prm['bench_height_m']:.2f} m, face angle {prm['face_angle_deg']:g} deg\n"
             f"- bench floor elevations: {', '.join(f'{v:.1f}' for v in prm['bench_floor_levels_m'])} m\n"
-            "Rhino: set units to Meters; turn off 'Map OBJ Y to Rhino Z'.\n")
+            "Rhino: set units to Meters; turn off 'Map OBJ Y to Rhino Z'.\n", encoding="utf-8")
     exports.append(notes)
 
     checks = Path(job["checks_dir"])
@@ -158,7 +158,7 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     bl.add_origin_marker(ccoll, meta, max(50.0, r * 3))
 
     # --- pit outline curves ---
-    gj = json.loads(Path(job["outline"]).read_text())
+    gj = json.loads(Path(job["outline"]).read_text(encoding="utf-8"))
     zfull = z
     for i, f in enumerate(gj["features"]):
         geom = f["geometry"]
@@ -192,7 +192,7 @@ def build_scene(job, meta, prm, ext, origin, r, log):
 
 
 def main():
-    job = json.loads(Path(job_path()).read_text())
+    job = json.loads(Path(job_path()).read_text(encoding="utf-8"))
     log = logging.getLogger("quarry.blender07")
     log.setLevel(logging.INFO)
     fh = logging.FileHandler(job["log_file"], encoding="utf-8")
@@ -204,7 +204,7 @@ def main():
     except Exception as e:
         log.error("Terrace build failed: %s\n%s", e, traceback.format_exc())
         res = {"error": f"{type(e).__name__}: {e}"}
-    Path(job["result"]).write_text(json.dumps(res, indent=2))
+    Path(job["result"]).write_text(json.dumps(res, indent=2), encoding="utf-8")
 
 
 main()

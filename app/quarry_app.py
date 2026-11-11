@@ -145,7 +145,7 @@ def stage_status(cfg, paths, stage):
     if stage == "00":
         rep = PROJECT / "logs" / "env_report.json"
         if rep.exists():
-            r = json.loads(rep.read_text())
+            r = json.loads(rep.read_text(encoding="utf-8"))
             return {"status": "ok" if not r.get("missing") else "failed", "summary": [],
                     "missing": r.get("missing", []), "warnings": r.get("warnings", []),
                     "check_images": []}
@@ -191,7 +191,7 @@ def state():
         pp = PROJECT / t["pit_mask"]
         if pp.exists():
             try:
-                pit = json.loads(pp.read_text())
+                pit = json.loads(pp.read_text(encoding="utf-8"))
             except Exception:
                 pit = None
     s["config"] = {
@@ -232,6 +232,8 @@ def run_stages(stages: list[str]):
     if JOB.api_key:
         env["OPENTOPO_API_KEY"] = JOB.api_key
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONUTF8"] = "1"            # same text encoding on every system
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         for st in stages:
             with JOB.lock:
@@ -239,7 +241,7 @@ def run_stages(stages: list[str]):
             JOB.log(f"===== Step {st}: {STAGE_INFO[st][0]} =====")
             cmd = [sys.executable, str(ROOT / "run_pipeline.py"), "--config", str(CONFIG), "--only", st, "--auto"]
             proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, env=env, bufsize=1)
+                                    text=True, encoding="utf-8", errors="replace", env=env, bufsize=1)
             tail = []
             for line in proc.stdout:
                 line = line.rstrip("\n")
@@ -284,7 +286,7 @@ def start_job(mode: str, stage: str | None = None) -> str | None:
             # always (re)check setup before the first real step
             first = next((s for s in pending if s != "00"), None)
             rep = PROJECT / "logs" / "env_report.json"
-            env_ok = rep.exists() and not json.loads(rep.read_text()).get("missing")
+            env_ok = rep.exists() and not json.loads(rep.read_text(encoding="utf-8")).get("missing")
             todo = ["00"] if not env_ok else ([first] if first else [])
         else:  # all
             todo = pending
@@ -340,7 +342,7 @@ def save_settings(data: dict) -> str | None:
         if data["pit"]:
             p = PROJECT / PIT_FILE
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(data["pit"]))
+            p.write_text(json.dumps(data["pit"]), encoding="utf-8")
             upd["terraces.pit_mask"] = PIT_FILE
         else:
             upd["terraces.pit_mask"] = None

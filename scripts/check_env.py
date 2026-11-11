@@ -36,16 +36,17 @@ def probe_blender(blender: str) -> dict:
     probe = Path(__file__).resolve().parent / "blender_helpers" / "probe_env.py"
     cmd = [blender, "--background", "--python", str(probe)]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=180)
     except FileNotFoundError:
         return {"error": f"Blender executable not found at {blender}"}
     except subprocess.TimeoutExpired:
         return {"error": "Blender did not finish the probe within 180 s"}
-    for line in out.stdout.splitlines():
+    for line in (out.stdout or "").splitlines():
         if line.startswith("PROBE_JSON:"):
             return json.loads(line[len("PROBE_JSON:"):])
     return {"error": "Blender ran but returned no probe output.\n"
-                     + (out.stderr or out.stdout)[-1500:]}
+                     + (out.stderr or out.stdout or "")[-1500:]}
 
 
 def main(argv=None) -> int:

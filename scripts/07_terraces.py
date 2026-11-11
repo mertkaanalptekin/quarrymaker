@@ -88,7 +88,7 @@ def load_user_mask(path, cfg, transform, shape):
         p = Path(cfg["_root"]) / p
     if not p.exists():
         raise common.PipelineError(f"terraces.pit_mask not found: {p}")
-    gj = json.loads(p.read_text())
+    gj = json.loads(p.read_text(encoding="utf-8"))
     feats = gj["features"] if gj.get("type") == "FeatureCollection" else [gj]
     geoms = [shp(f["geometry"] if "geometry" in f else f) for f in feats]
     minx = min(g.bounds[0] for g in geoms)
@@ -300,7 +300,7 @@ def main(argv=None) -> int:
                         "geometry": mapping(p)} for i, p in enumerate(polys)]}
     outline = od / "pit_outline.geojson"
     if not outline.exists():
-        outline.write_text(json.dumps(gj))
+        outline.write_text(json.dumps(gj), encoding="utf-8")
     files.append(outline)
 
     patch = od / "blender_patch.npz"
@@ -422,7 +422,7 @@ def main(argv=None) -> int:
         log.info("%s: %s - %s", "PASS" if ok else "FAIL", name, det)
 
     report = od / "report_terraces.md"
-    report.write_text(make_report(paths, meta, params, checks, br, imgs, files))
+    report.write_text(make_report(paths, meta, params, checks, br, imgs, files), encoding="utf-8")
     summary = [
         f"Pit: {mask_info['area_m2'] / 1e4:.1f} ha ({mask_info['source']}); water bodies {n_water}",
         f"Bench floors at {', '.join(f'{v:.1f}' for v in floors)} m",

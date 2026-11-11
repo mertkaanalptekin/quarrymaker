@@ -99,7 +99,10 @@ def run_blender(blender: str, script: Path, job_path: Path, log) -> int:
     cmd = [blender, "--background", "--factory-startup", "--python", str(script),
            "--", "--job", str(job_path)]
     log.info("Running: %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Blender prints UTF-8; never let an unusual character (e.g. a Turkish folder
+    # name on a Windows with a non-UTF-8 code page) stop the pipeline
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace")
     for line in proc.stdout:
         line = line.rstrip()
         if line and not line.startswith("Fra:"):
@@ -112,7 +115,7 @@ def run_blender(blender: str, script: Path, job_path: Path, log) -> int:
 # ======================================================================
 
 def blender_main(job_path: str) -> None:
-    job = json.loads(Path(job_path).read_text())
+    job = json.loads(Path(job_path).read_text(encoding="utf-8"))
     log = logging.getLogger("quarry.blender")
     log.setLevel(logging.INFO)
     fh = logging.FileHandler(job["log_file"], encoding="utf-8")
@@ -125,9 +128,9 @@ def blender_main(job_path: str) -> None:
         import traceback
         log.error("Build failed: %s\n%s", e, traceback.format_exc())
         res = {"error": f"{type(e).__name__}: {e}"}
-        Path(job["result"]).write_text(json.dumps(res, indent=2))
+        Path(job["result"]).write_text(json.dumps(res, indent=2), encoding="utf-8")
         sys.exit(1)
-    Path(job["result"]).write_text(json.dumps(res, indent=2))
+    Path(job["result"]).write_text(json.dumps(res, indent=2), encoding="utf-8")
 
 
 def _bl():
@@ -140,7 +143,7 @@ def build(job: dict, log) -> dict:
     import bpy
 
     bl = _bl()
-    meta = json.loads(Path(job["meta"]).read_text())
+    meta = json.loads(Path(job["meta"]).read_text(encoding="utf-8"))
     root = Path(job["checks_dir"]).parent.parent
     blend = Path(job["blend"])
     rhino = Path(job["rhino_dir"])
@@ -256,7 +259,7 @@ def export_rhino(job, meta, obj, rhino: Path, log) -> list[Path]:
         out.append(p)
     notes = rhino / "rhino_import_notes.md"
     if not notes.exists():
-        notes.write_text(rhino_notes(meta, obj))
+        notes.write_text(rhino_notes(meta, obj), encoding="utf-8")
     out.append(notes)
     return out
 
