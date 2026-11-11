@@ -1,0 +1,36 @@
+# Quarry base-terrain pipeline configuration.
+# Fields marked FILL ME must be supplied by you; the pipeline stops and asks
+# rather than guessing them.
+
+run_id: auto            # auto-increments v001, v002... (or pin e.g. v003)
+aoi:
+  # WGS84 lon/lat of the area of interest; the user supplies these   <-- FILL ME
+  west: null
+  south: null
+  east: null
+  north: null
+  buffer_m: 500         # extra margin so edges don't clip the site
+crs_epsg: 32635         # UTM 35N; units meters, Z up
+dem:
+  source: COP30         # OpenTopography demtype; COP30 preferred over SRTMGL1 (SRTM is from 2000, before most of the excavation)
+  target_resolution_m: 30   # keep native; set lower (e.g., 10) only for smoother render meshes, logged as resampled
+  resampling: bilinear  # nearest | bilinear | cubic (used when reprojecting the DEM to UTM)
+imagery:
+  mode: esri_tiles      # esri_tiles | user_geotiff | none
+  zoom: 17
+  user_geotiff: null    # path to a georeferenced GeoTIFF when mode = user_geotiff
+  # Extra settings for esri_tiles mode (defaults are fine):
+  tile_url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  throttle_s: 0.15      # pause between tile requests
+  max_tiles: 3000       # safety cap; lower the zoom if the AOI needs more
+  resampling: bilinear  # used when reprojecting the imagery to UTM
+blender:
+  path: null            # <-- FILL ME (or set BLENDER_PATH), e.g. /Applications/Blender.app/Contents/MacOS/Blender
+  mesh_decimate_ratio: 1.0   # 1.0 = one vertex per DEM cell
+  check_render_px: 1600      # long side of the stage 06 check renders
+  check_render_samples: 32   # Cycles samples for check renders
+gaea:
+  size_px: 2048         # square heightmap
+  bit_depth: 16
+rhino:
+  formats: [obj, fbx]

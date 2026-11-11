@@ -1,0 +1,13 @@
+# Generated data and outputs (large, reproducible from config.yaml)
+data/raw/
+data/processed/
+terrain/
+exchange/
+checks/
+logs/
+# keep the reference folder, not its images (add them yourself if you want them versioned)
+data/reference/*
+!data/reference/.gitkeep
+__pycache__/
+*.pyc
+*.blend1
