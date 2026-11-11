@@ -59,6 +59,8 @@ gaea:
   bit_depth: 16
 rhino:
   formats: [obj, fbx]
+terraces:
+  enabled: false   # this fixture's imagery is a test pattern with no benches
 """
 
 

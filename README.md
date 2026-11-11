@@ -7,6 +7,8 @@ satellite imagery into:
 - `exchange/rhino/vNNN/`: OBJ (Z-up, metres) + texture, FBX, `rhino_import_notes.md`
 - `exchange/gaea/vNNN/`: square 16-bit PNG + float EXR heightmap, colour map, `gaea_meta.json`, `README_gaea.md`
 - `terrain/00_base/vNNN/report.md`: inputs, settings, check results and limitations
+- **`terrain/10_terraces/vNNN/quarry_terraced.blend`**: quarry benches **calculated from the
+  satellite image + DEM** (stage 07, interpreted, never mixed into the measured base)
 
 The full spec is in [CLAUDE.md](CLAUDE.md).
 
@@ -33,7 +35,7 @@ python scripts/check_env.py
 ## Run
 
 ```bash
-python run_pipeline.py            # stages 00-06, pauses after each stage for review
+python run_pipeline.py            # stages 00-07, pauses after each stage for review
 ```
 
 ```bash
@@ -49,6 +51,50 @@ python run_pipeline.py --from 03  # or: --only 05,  --new-run,  --force
 - **Skipping.** A stage skips its work when its outputs exist for the same config hash (`checks/vNNN/stage_NN.json`).
 - **Caching.** Downloads are cached in `data/raw/`: the DEM by bbox hash, the imagery tile by tile.
 - **Logging.** Everything goes to `logs/run_vNNN.log`, and check images go to `checks/vNNN/`.
+
+## Terraces from imagery (stage 07)
+
+A 30 m DEM shows a quarry as a smooth bowl, but the satellite image shows the benches. Stage 07
+combines the two:
+
+1. **Pit mask.** Bare rock in the image, kept where the DEM has relief. You can override it with
+   `terraces.pit_mask`, a GeoJSON polygon in lon/lat or the project CRS.
+2. **Bench edges.** Image edges that run *along* the DEM contours.
+3. **Bench height.** Benches are mined at fixed elevations, so edge strength projected onto
+   elevation repeats every *H*. The stage scans *H* and checks the result against spatially
+   shifted edge maps. If no real pattern is found, it stops and asks you for a known bench height.
+4. **Levels.** Bench floor elevations `G + (n + 0.5)·H` come from the phase of that pattern. The
+   DEM surface is corrected locally (by at most ±H/2) to meet them.
+5. **Geometry.** Flat floors and faces at `face_angle_deg`, built on the measured surface. Flat pit
+   floors keep the measured shape.
+
+In Blender, `quarry_terraced.blend` has the same BlenderGIS georeference as the base. The
+`TERRAIN_terraced` mesh carries these point attributes:
+- `confidence`
+- `terrace_class` (0 outside, 1 floor, 2 bench, 3 face, 4 water)
+- `dz_interp`
+
+Switch its material to `MAT_terrace_confidence` or `MAT_terrace_class` to inspect them. Bench
+floor elevations are listed in `terraces_params.json` and on the object.
+
+**How accurate.** On a synthetic quarry with known benches
+(`python tests/synthetic_quarry.py make|evaluate`):
+
+| | plain 30 m DEM | stage 07 |
+|---|---|---|
+| bench zone within 3 m of truth | 65% | 86% |
+| bench height | – | within ~2% (11.8 m vs 12 m) |
+| bench floor levels | – | within ~1 m with a known H (the DEM's own bias) |
+| pit outline overlap | – | 96% |
+
+Accuracy is limited by three things:
+- **DEM date.** The DEM predates the imagery: newly dug areas have no depth information. See
+  `confidence.tif`.
+- **Plan detail.** Bench positions in plan follow the 30 m DEM contours. Very tight curves are
+  simplified.
+- **Unmodelled features.** Face angle and haul ramps are not measured.
+
+If you know the bench height, set `terraces.bench_height_m`.
 
 ## BlenderGIS georeferencing
 
@@ -74,8 +120,9 @@ checks them against `meta.json`. `scale` is left unset; BlenderGIS reads that as
 ## Testing without network
 
 `tests/make_synthetic_fixture.py` builds a throwaway project with a **synthetic**
-DEM, synthetic tiles and a synthetic reference image. It pre-seeds the caches,
-so stages 01 and 02 make no requests:
+DEM, synthetic tiles and a synthetic reference image (terraces off). It pre-seeds the
+caches, so stages 01 and 02 make no requests. `tests/synthetic_quarry.py` builds a quarry with
+known benches, for testing stage 07:
 
 ```bash
 python tests/make_synthetic_fixture.py /tmp/quarry_test --blender /path/to/blender

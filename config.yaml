@@ -34,3 +34,19 @@ gaea:
   bit_depth: 16
 rhino:
   formats: [obj, fbx]
+terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (base stays measured)
+  enabled: true
+  resolution_m: 2.0         # interpreted grid (divides the DEM cell)
+  bench_height_m: auto      # auto = estimated from imagery+DEM (~2% accurate); set e.g. 12 if you know it (better levels)
+  bench_height_range_m: [5, 25]
+  face_angle_deg: 70        # bench face angle (not measurable from imagery)
+  min_slope_deg: 8          # flatter areas (pit floor) keep the measured shape
+  surface_smoothing_m: 20
+  local_window_m: 30        # window for the local DEM correction to the bench levels
+  pit_mask: null            # optional GeoJSON polygon of the pit (lon/lat or project CRS)
+  pit_threshold: null       # optional fixed imagery threshold if auto-detection fails
+  pit_min_area_m2: 20000
+  pit_min_local_relief_m: 3
+  margin_m: 150             # mesh = pit bbox + margin
+  mesh_max_vertices: 3000000
+  require_significant: true # stop and ask when no bench pattern is visible (auto height)

@@ -8,11 +8,12 @@ Inputs: an area of interest, a 30 m DEM from OpenTopography, and satellite image
 Outputs:
 - a georeferenced, true-scale Blender terrain that is compatible with the BlenderGIS add-on;
 - a heightmap package for Gaea;
-- mesh exports for Rhino.
+- mesh exports for Rhino;
+- an **interpreted** terrace model (stage 07): quarry benches calculated from the satellite image with the help of the DEM, as a Blender file in the same georeference.
 
 Later stages read from this base: Gaea terraforming, precipitation simulations, architectural modeling and renders. Base terrain is the single source of truth for scale, coordinates and elevation.
 
-Scope of this task: **base terrain only.** Do not build Gaea graphs, simulations or architecture yet. Only produce the files those stages will consume.
+Scope: the measured base terrain (stages 00–06) plus the interpreted terrace model (stage 07). Do not build Gaea graphs, simulations or architecture yet. Only produce the files those stages will consume.
 
 ---
 
@@ -26,8 +27,9 @@ Scope of this task: **base terrain only.** Do not build Gaea graphs, simulations
    - A new run writes to a new versioned folder, e.g. `terrain/00_base/v002/`.
 4. **Keep measured data separate from interpreted data.**
    - The base terrain is the DEM exactly as measured.
-   - Do not add benches, smoothing or erosion here.
+   - Do not add benches, smoothing or erosion to `terrain/00_base/`.
    - Resampling is allowed only as configured, and must be logged.
+   - Interpreted geometry (benches from stage 07) lives only in `terrain/10_terraces/vNNN/` and `exchange/rhino/vNNN/terraced/`, is labelled as interpreted, and never changes the base. Stage 07 checks the base files' hashes before and after.
 5. **Ask, don't guess.**
    - If the bounding box, CRS, Blender path or API key is missing, stop and ask the user.
    - Never invent coordinates.
@@ -45,7 +47,8 @@ Write `scripts/check_env.py`. It verifies:
 
 Report anything missing as a clear list. If an install needs approval, ask the user before running it.
 
-**BlenderGIS compatibility.** Before writing any Blender script, read BlenderGIS's geoscene source code. Confirm how it stores georeferencing on the scene: the CRS and the scene origin, normally the scene custom properties `crs`, `crsx` and `crsy`. The terrain built in stage 4 must set the same properties, so the user can keep using BlenderGIS tools (basemaps, extra imports) on this file and everything lands in the right place.
+**BlenderGIS compatibility.** Before writing any Blender script, read BlenderGIS's geoscene source code. Confirm how it stores georeferencing on the scene: the CRS and the scene origin. The terrain built in stage 4 must set the same properties, so the user can keep using BlenderGIS tools (basemaps, extra imports) on this file and everything lands in the right place.
+- Confirmed in BlenderGIS 2.2.14 `geoscene.py` (class `SK`): scene custom properties `SRID` (e.g. `EPSG:32635`), `crs x`, `crs y` (origin in CRS units), `longitude`, `latitude` (origin in WGS84). Not `crs`/`crsx`/`crsy`. Both stage 04 and stage 07 .blend files set these.
 
 ---
 
@@ -63,15 +66,17 @@ quarry_project/
     04_build_blender.py      # runs inside Blender
     05_export_gaea.py
     06_verify.py
+    07_terraces.py           # interpreted benches (+ terraces.py library)
   data/
     raw/            # untouched downloads, cached
     processed/      # reprojected / clipped rasters
     reference/      # user's Google Earth image, notes
   terrain/
-    00_base/vNNN/   # .blend, exports, meta.json, report
+    00_base/vNNN/   # .blend, exports, meta.json, report  (measured, write-once)
+    10_terraces/vNNN/  # interpreted benches: rasters, .blend, report
   exchange/
     gaea/vNNN/      # heightmap package for Gaea
-    rhino/vNNN/     # meshes + texture for Rhino
+    rhino/vNNN/     # meshes + texture for Rhino (terraced/ = interpreted)
   checks/vNNN/      # check images
   logs/
 ```
@@ -103,6 +108,12 @@ gaea:
   bit_depth: 16
 rhino:
   formats: [obj, fbx]
+terraces:
+  enabled: true
+  resolution_m: 2.0
+  bench_height_m: auto      # or the known bench height in metres
+  face_angle_deg: 70
+  pit_mask: null            # optional GeoJSON pit outline
 ```
 
 ---
@@ -180,10 +191,32 @@ Write `terrain/00_base/vNNN/report.md` containing the inputs, settings, the resu
 
 Known limitations to state in the report: at 30 m resolution, quarry benches (about 10–15 m high) are not captured, and the DEM's capture date is earlier than the imagery's.
 
+### 07 — Interpret terraces (`07_terraces.py`)
+Calculates the quarry's benches from the satellite image with the help of the DEM. All output is **interpreted** and kept apart from the base.
+- **Pit mask:** bright, unsaturated, non-vegetated imagery (two-level Otsu on a quarry index), kept only where the DEM shows local relief. The user can supply `terraces.pit_mask` (GeoJSON) instead.
+- **Edges:** image edges that run along the DEM contours (bench crests and toes).
+- **Bench height:** benches are mined at fixed elevations, so edge strength projected onto elevation repeats every H. H maximises that coherence above the baseline of the elevation distribution. A known H can be set.
+- **Significance:** the score must beat the same score computed on spatially shifted edge maps by ×1.5. Otherwise, with an automatic H, the stage stops and asks (ask, don't guess).
+- **Levels and surface:** bench floors are global elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them.
+- **Geometry:** a staircase with the configured face angle, where faces take a fraction `tan(slope)/tan(face angle)` of each period. Flat pit floors keep the measured shape. Water is flattened.
+- **Outputs:**
+  - `terraces_dem.tif`, `classes.tif`, `confidence.tif`, `dz.tif` and `surface_correction.tif`;
+  - `pit_outline.geojson` and `terraces_params.json` (bench height, floor elevations, statistics);
+  - `quarry_terraced.blend`: same BlenderGIS georef and origin. Interpreted mesh with `confidence`, `terrace_class` and `dz_interp` attributes, plus the measured context mesh and the pit outline curve;
+  - OBJ/FBX in `exchange/rhino/vNNN/terraced/`;
+  - `report_terraces.md` and check images.
+- **Checks:**
+  - the base is untouched (hashes);
+  - interpreted = measured outside the pit;
+  - no systematic shift (mean dz within H/4);
+  - the .blend georef equals `meta.json`;
+  - the mesh Z range and position match the raster.
+- **Test:** `tests/synthetic_quarry.py` builds a quarry with known benches and measures the recovery. On it, H is within ~2%. With a known H, bench floors are within the DEM's vertical bias (~1 m), and 86% of the bench zone is within 3 m of the truth, against 65% for the plain DEM.
+
 ---
 
 ## Orchestrator (`run_pipeline.py`)
-- `python run_pipeline.py` runs stages 0 to 6 in order.
+- `python run_pipeline.py` runs stages 0 to 7 in order.
 - `--from 03` and `--only 05` run part of the pipeline. `--auto` skips the pauses between stages.
 - Each stage is idempotent: it skips work when its outputs exist and the config hash hasn't changed.
 - Log everything to `logs/run_vNNN.log`.
@@ -196,7 +229,7 @@ Known limitations to state in the report: at 30 m resolution, quarry benches (ab
 - The Gaea package and its README are enough to set up a Gaea project at the correct scale without any guesswork.
 
 ## Out of scope for this task (later stages will use these outputs)
-- Bench and haul-road reconstruction, and pit masks.
+- Haul-road and ramp reconstruction (benches and pit masks are now stage 07).
 - Gaea graphs.
 - Hydrology and precipitation simulation.
 - Architectural modeling.

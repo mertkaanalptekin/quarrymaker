@@ -130,9 +130,16 @@ def blender_main(job_path: str) -> None:
     Path(job["result"]).write_text(json.dumps(res, indent=2))
 
 
+def _bl():
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "blender_helpers"))
+    import bl_common
+    return bl_common
+
+
 def build(job: dict, log) -> dict:
     import bpy
 
+    bl = _bl()
     meta = json.loads(Path(job["meta"]).read_text())
     root = Path(job["checks_dir"]).parent.parent
     blend = Path(job["blend"])
@@ -141,23 +148,20 @@ def build(job: dict, log) -> dict:
 
     if job["mode"] == "build":
         bpy.ops.wm.read_factory_settings(use_empty=True)
-        bpy.context.preferences.filepaths.save_version = 0
         obj, stats = build_scene(job, meta, log)
-        Path(job["textures_dir"]).mkdir(parents=True, exist_ok=True)
-        bpy.ops.wm.save_as_mainfile(filepath=str(blend))
-        bpy.ops.file.make_paths_relative()
-        bpy.ops.wm.save_as_mainfile(filepath=str(blend))
+        bl.save_blend(blend)
         log.info("Saved %s", blend)
     else:
         bpy.ops.wm.open_mainfile(filepath=str(blend))
         obj = bpy.data.objects["TERRAIN_base"]
-        stats = mesh_stats(obj)
+        stats = bl.mesh_stats(obj)
         stats["stride"] = obj.get("dem_stride", 1)
         stats["grid"] = list(obj.get("grid_rows_cols", [0, 0]))
 
     exports = export_rhino(job, meta, obj, rhino, log)
     preview = Path(job["checks_dir"]) / "04_blender_preview.png"
-    render_preview(preview, log)
+    bl.render("CAM_oblique", preview, 800, 16)
+    log.info("Preview render -> %s", preview)
 
     scn = bpy.context.scene
     return {
@@ -172,8 +176,8 @@ def build(job: dict, log) -> dict:
 def build_scene(job, meta, log):
     import bpy
     import numpy as np
-    from mathutils import Vector
 
+    bl = _bl()
     ext = meta["extent"]
     r = float(meta["grid"]["cell_size_m"])
     ox, oy = float(meta["origin_x"]), float(meta["origin_y"])
@@ -191,44 +195,10 @@ def build_scene(job, meta, log):
                     ratio, stride)
     z = dem[np.ix_(rows, cols)]
     h, w = z.shape
-
     # One vertex per DEM cell centre; XY = real coordinates minus the origin.
     xs_abs = ext["xmin"] + (cols + 0.5) * r
     ys_abs = ext["ymax"] - (rows + 0.5) * r
-    X, Y = np.meshgrid(xs_abs - ox, ys_abs - oy)
-    co = np.stack([X, Y, z], axis=-1).reshape(-1).astype("float32")
-
-    idx = np.arange(h * w, dtype="int32").reshape(h, w)
-    # NW -> SW -> SE -> NE : counter-clockwise from above, normals point +Z
-    quads = np.stack([idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]], axis=-1).reshape(-1)
-    nf = (h - 1) * (w - 1)
-
-    me = bpy.data.meshes.new("TERRAIN_base")
-    me.vertices.add(h * w)
-    me.vertices.foreach_set("co", co)
-    me.loops.add(nf * 4)
-    me.loops.foreach_set("vertex_index", quads)
-    me.polygons.add(nf)
-    me.polygons.foreach_set("loop_start", np.arange(0, nf * 4, 4, dtype="int32"))
-    try:  # Blender < 4.0 needs loop_total; newer versions derive it
-        me.polygons.foreach_set("loop_total", np.full(nf, 4, dtype="int32"))
-    except (AttributeError, RuntimeError, TypeError):
-        pass
-
-    # UVs from the extent bounds (the ortho covers exactly the extent).
-    U = (np.meshgrid(xs_abs, ys_abs)[0] - ext["xmin"]) / (ext["xmax"] - ext["xmin"])
-    V = (np.meshgrid(xs_abs, ys_abs)[1] - ext["ymin"]) / (ext["ymax"] - ext["ymin"])
-    uv_v = np.stack([U, V], axis=-1).reshape(-1, 2)
-    uv = me.uv_layers.new(name="UVMap")
-    uv.data.foreach_set("uv", uv_v[quads].reshape(-1).astype("float32"))
-
-    me.update(calc_edges=True)
-    if me.validate(verbose=False):
-        log.warning("mesh.validate() corrected something - inspect the mesh")
-    try:
-        me.shade_smooth()
-    except AttributeError:
-        me.polygons.foreach_set("use_smooth", np.ones(nf, dtype=bool))
+    me = bl.grid_mesh("TERRAIN_base", z, xs_abs, ys_abs, ext, (ox, oy))
 
     coll = bpy.data.collections.new("00_base")
     bpy.context.scene.collection.children.link(coll)
@@ -242,120 +212,22 @@ def build_scene(job, meta, log):
     obj["dem_stride"] = stride
     obj["grid_rows_cols"] = [h, w]
     obj["note"] = "Measured DEM, unedited. Real coordinates = local XY + (origin_x, origin_y)."
+    bl.add_origin_marker(coll, meta, max(50.0, r * 3))
 
-    marker = bpy.data.objects.new("ORIGIN_marker", None)
-    marker.empty_display_type = "ARROWS"
-    marker.empty_display_size = max(50.0, r * 3)
-    marker["origin_x"] = ox
-    marker["origin_y"] = oy
-    coll.objects.link(marker)
+    tex = bl.copy_texture(job["ortho_tif"], Path(job["textures_dir"]))
+    me.materials.append(bl.ortho_material("MAT_terrain_ortho", tex))
+    bl.setup_scene_units_and_georef(meta)
 
-    # Material: ortho as Base Color, high roughness.
-    tex_dir = Path(job["textures_dir"])
-    tex_dir.mkdir(parents=True, exist_ok=True)
-    tex = tex_dir / "ortho_utm.tif"
-    if not tex.exists():
-        shutil.copy2(job["ortho_tif"], tex)
-    mat = bpy.data.materials.new("MAT_terrain_ortho")
-    try:
-        mat.use_nodes = True
-    except AttributeError:
-        pass
-    nt = mat.node_tree
-    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
-    img_node = nt.nodes.new("ShaderNodeTexImage")
-    img_node.location = (-400, 200)
-    img_node.image = bpy.data.images.load(str(tex))
-    img_node.image.name = "ortho_utm"
-    img_node.extension = "EXTEND"
-    img_node.interpolation = "Cubic"
-    nt.links.new(img_node.outputs["Color"], bsdf.inputs["Base Color"])
-    bsdf.inputs["Roughness"].default_value = 0.9
-    for name in ("Specular IOR Level", "Specular"):
-        if name in bsdf.inputs:
-            bsdf.inputs[name].default_value = 0.1
-            break
-    me.materials.append(mat)
-
-    # Scene units & BlenderGIS georeferencing.
-    scn = bpy.context.scene
-    scn.unit_settings.system = "METRIC"
-    scn.unit_settings.scale_length = 1.0
-    scn.unit_settings.length_unit = "METERS"
-    set_blendergis_georef(scn, meta)
-
-    # Camera rig + sun.
     zmin, zmax = float(z.min()), float(z.max())
     wm, hm = ext["xmax"] - ext["xmin"], ext["ymax"] - ext["ymin"]
     cx, cy = (ext["xmin"] + ext["xmax"]) / 2 - ox, (ext["ymin"] + ext["ymax"]) / 2 - oy
     rig = bpy.data.collections.new("00_base_rig")
-    scn.collection.children.link(rig)
+    bpy.context.scene.collection.children.link(rig)
+    _, obl, _, dist = bl.add_rig(rig, cx, cy, wm, hm, zmin, zmax)
+    bpy.context.scene.camera = obl
+    bl.setup_world_and_render(dist * 4)
 
-    top_cd = bpy.data.cameras.new("CAM_top_ortho")
-    top_cd.type = "ORTHO"
-    top_cd.ortho_scale = max(wm, hm)
-    top_cd.clip_start = 1.0
-    top_cd.clip_end = (zmax - zmin) + 2000.0
-    top = bpy.data.objects.new("CAM_top_ortho", top_cd)
-    top.location = (cx, cy, zmax + 1000.0)
-    top["render_aspect"] = [wm, hm]
-    rig.objects.link(top)
-
-    import math
-    obl_cd = bpy.data.cameras.new("CAM_oblique")
-    obl_cd.lens = 35.0
-    diag = math.hypot(wm, hm)
-    hfov = 2 * math.atan(obl_cd.sensor_width / (2 * obl_cd.lens))
-    dist = 1.05 * (diag / 2) / math.tan(hfov / 2)
-    az, el = math.radians(202.5), math.radians(35.0)  # from SSW, 35 deg above horizon
-    target = Vector((cx, cy, (zmin + zmax) / 2))
-    pos = target + dist * Vector((math.cos(el) * math.sin(az), math.cos(el) * math.cos(az),
-                                  math.sin(el)))
-    obl = bpy.data.objects.new("CAM_oblique", obl_cd)
-    obl.location = pos
-    obl.rotation_euler = (target - pos).to_track_quat("-Z", "Y").to_euler()
-    obl_cd.clip_start = 1.0
-    obl_cd.clip_end = dist * 4
-    rig.objects.link(obl)
-
-    sun_d = bpy.data.lights.new("SUN_main", "SUN")
-    sun_d.energy = 4.0
-    sun_d.angle = math.radians(1.0)
-    sun = bpy.data.objects.new("SUN_main", sun_d)
-    s_az, s_el = math.radians(315.0), math.radians(40.0)  # cartographic NW light
-    to_sun = Vector((math.cos(s_el) * math.sin(s_az), math.cos(s_el) * math.cos(s_az),
-                     math.sin(s_el)))
-    sun.rotation_euler = (-to_sun).to_track_quat("-Z", "Y").to_euler()
-    sun.location = (cx, cy, zmax + 500)
-    rig.objects.link(sun)
-    scn.camera = obl
-
-    world = bpy.data.worlds.new("WORLD_sky")
-    scn.world = world
-    try:
-        world.use_nodes = True
-    except AttributeError:
-        pass
-    bg = next((n for n in world.node_tree.nodes if n.type == "BACKGROUND"), None)
-    if bg:
-        bg.inputs["Color"].default_value = (0.55, 0.62, 0.72, 1.0)
-        bg.inputs["Strength"].default_value = 0.6
-
-    scn.render.engine = "CYCLES"
-    scn.cycles.samples = 64
-    scn.render.resolution_x = 1920
-    scn.render.resolution_y = 1080
-    scn.render.resolution_percentage = 100
-
-    # Make the terrain visible when the file is opened (default clip_end is 1 km).
-    for screen in bpy.data.screens:
-        for area in screen.areas:
-            for space in area.spaces:
-                if space.type == "VIEW_3D":
-                    space.clip_start = 1.0
-                    space.clip_end = max(100000.0, dist * 4)
-
-    stats = mesh_stats(obj)
+    stats = bl.mesh_stats(obj)
     stats["stride"] = stride
     stats["grid"] = [h, w]
     log.info("Built TERRAIN_base: %d verts, %d quads, bbox %s", stats["verts"], stats["faces"],
@@ -363,73 +235,25 @@ def build_scene(job, meta, log):
     return obj, stats
 
 
-def set_blendergis_georef(scn, meta):
-    """Write the georef exactly as BlenderGIS's GeoScene does (geoscene.py, class SK):
-    SRID (CRS string 'EPSG:xxxx'), 'crs x'/'crs y' (scene origin in CRS units),
-    'longitude'/'latitude' (same origin in WGS84). Scale is left unset (BlenderGIS
-    default 1 = true scale)."""
-    K = common.BGIS_KEYS
-    scn[K["crs"]] = str(meta["crs"])
-    scn[K["crsx"]] = float(meta["origin_x"])
-    scn[K["crsy"]] = float(meta["origin_y"])
-    scn[K["lon"]] = float(meta["origin_lon"])
-    scn[K["lat"]] = float(meta["origin_lat"])
-
-
-def mesh_stats(obj) -> dict:
-    import numpy as np
-    me = obj.data
-    co = np.empty(len(me.vertices) * 3, dtype="float64")
-    me.vertices.foreach_get("co", co)
-    co = co.reshape(-1, 3)
-    return {"verts": len(me.vertices), "faces": len(me.polygons),
-            "bbox": [*co.min(axis=0).tolist(), *co.max(axis=0).tolist()]}
-
-
 def export_rhino(job, meta, obj, rhino: Path, log) -> list[Path]:
-    import bpy
-
+    bl = _bl()
     out = []
-    for o in bpy.context.view_layer.objects:
-        o.select_set(False)
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-
     tex = rhino / TEX_NAME
     if not tex.exists():
         shutil.copy2(job["ortho_jpg"], tex)
     out.append(tex)
-
     if "obj" in job["formats"]:
         p = rhino / OBJ_NAME
         if not p.exists():
-            bpy.ops.wm.obj_export(filepath=str(p), export_selected_objects=True,
-                                  forward_axis="Y", up_axis="Z", global_scale=1.0,
-                                  export_uv=True, export_normals=True, export_materials=True,
-                                  path_mode="STRIP", apply_modifiers=True)
-            mtl = p.with_suffix(".mtl")
-            if mtl.exists():
-                lines = [ln for ln in mtl.read_text().splitlines() if not ln.startswith("map_Kd")]
-                fixed, done = [], False
-                for ln in lines:
-                    fixed.append(ln)
-                    if ln.startswith("newmtl") and not done:
-                        fixed.append(f"map_Kd {TEX_NAME}")
-                        done = True
-                mtl.write_text("\n".join(fixed) + "\n")
+            bl.export_obj(obj, p, TEX_NAME)
             log.info("Exported %s (forward Y, up Z)", p)
         out += [p, p.with_suffix(".mtl")]
-
     if "fbx" in job["formats"]:
         p = rhino / FBX_NAME
         if not p.exists():
-            bpy.ops.export_scene.fbx(filepath=str(p), use_selection=True, object_types={"MESH"},
-                                     axis_forward="Y", axis_up="Z", global_scale=1.0,
-                                     apply_unit_scale=True, apply_scale_options="FBX_SCALE_NONE",
-                                     path_mode="COPY", embed_textures=True, mesh_smooth_type="FACE")
+            bl.export_fbx(obj, p)
             log.info("Exported %s", p)
         out.append(p)
-
     notes = rhino / "rhino_import_notes.md"
     if not notes.exists():
         notes.write_text(rhino_notes(meta, obj))
@@ -469,20 +293,6 @@ Z up, at true scale (1 unit = 1 m).
 - Imagery: {meta['imagery'].get('attribution')}
 - This is measured terrain (no benches, smoothing or erosion added).
 """
-
-
-def render_preview(path: Path, log):
-    import bpy
-    scn = bpy.context.scene
-    scn.camera = bpy.data.objects["CAM_oblique"]
-    scn.render.engine = "CYCLES"
-    scn.cycles.samples = 16
-    scn.cycles.device = "CPU"
-    scn.render.resolution_x, scn.render.resolution_y = 800, 450
-    scn.render.image_settings.file_format = "PNG"
-    scn.render.filepath = str(path)
-    bpy.ops.render.render(write_still=True)
-    log.info("Preview render -> %s", path)
 
 
 # ======================================================================
