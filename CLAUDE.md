@@ -195,9 +195,19 @@ Known limitations to state in the report: at 30 m resolution, quarry benches (ab
 Calculates the quarry's benches from the satellite image with the help of the DEM. All output is **interpreted** and kept apart from the base.
 - **Pit mask:** bright, unsaturated, non-vegetated imagery (two-level Otsu on a quarry index), kept only where the DEM shows local relief. The user can supply `terraces.pit_mask` (GeoJSON) instead.
 - **Edges:** image edges that run along the DEM contours (bench crests and toes).
-- **Bench height:** benches are mined at fixed elevations, so edge strength projected onto elevation repeats every H. H maximises that coherence above the baseline of the elevation distribution. A known H can be set.
-- **Significance:** the score must beat the same score computed on spatially shifted edge maps by ×1.5. Otherwise, with an automatic H, the stage stops and asks (ask, don't guess).
-- **Levels and surface:** bench floors are global elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them.
+- **Bare ground only:** benches are looked for on bare rock or soil. The test uses colour saturation, which is lighting-independent, split inside the outline only when vegetation is clearly present.
+- **Bench height:** benches are mined at fixed elevations, so edge strength projected onto elevation repeats every H. H maximises that coherence above the baseline of the elevation distribution. Edges on planar wall parts weigh more, because a 30 m DEM squeezes elevations at the rim and floor. A known H can be set.
+- **Region by region:** a mining complex holds several pits and dumps with their own levels, plus areas dug after the DEM.
+  - The pattern is tested in overlapping regions of `region_size_m` (400 m).
+  - A region counts when its score beats two kinds of null maps by `min_significance` (×2):
+    - circularly shifted edge weights;
+    - spatially shifted edge maps, which keep regular line patterns such as field or road grids.
+  - Significant regions join into **bench zones** (usually one pit or dump each) when their heights and levels agree.
+  - Neighbouring zones merge when the union keeps one coherent level system.
+  - Each zone gets one H, refined to 0.02 m, and one level system.
+  - A zone is re-tested as a whole and must pass a plausibility check: implied bench floor at most `max_bench_width_m`, and H not at the edge of the search range.
+- **Ask, don't guess:** if no zone survives, the stage stops. It still writes `07_bench_evidence.png` and the other diagnostic images, and records the stage as failed, so the app shows the images.
+- **Levels and surface:** in each zone, bench floors sit at fixed elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them. Benches are built only where a zone has evidence (class 5 = pit without clear benches, which keeps the measured surface).
 - **Geometry:** a staircase with the configured face angle, where faces take a fraction `tan(slope)/tan(face angle)` of each period. Flat pit floors keep the measured shape. Water is flattened.
 - **Outputs:**
   - `terraces_dem.tif`, `classes.tif`, `confidence.tif`, `dz.tif` and `surface_correction.tif`;
@@ -211,7 +221,14 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - no systematic shift (mean dz within H/4);
   - the .blend georef equals `meta.json`;
   - the mesh Z range and position match the raster.
-- **Test:** `tests/synthetic_quarry.py` builds a quarry with known benches and measures the recovery. On it, H is within ~2%. With a known H, bench floors are within the DEM's vertical bias (~1 m), and 86% of the bench zone is within 3 m of the truth, against 65% for the plain DEM.
+- **Test:** `tests/synthetic_quarry.py make|evaluate` builds quarries with known benches and measures the recovery. Results (share of the bench area within 3 m of the truth, plain DEM → stage 07):
+  - `--scenario simple`, one pit: 65% → 89%, with H 11.84 m for a true 12 m.
+  - `--scenario complex`:
+    - pit A (12 m benches): 67% → 84%;
+    - pit B (10 m benches on other levels, small, with walls only about three DEM cells wide): 65% → 75%;
+    - pit C (dug after the DEM): correctly left as measured.
+  - Negative control: imagery without benches (a grid pattern) → the stage stops and asks.
+  - With a known H, bench floors are within the DEM's vertical bias (~1 m).
 
 ---
 

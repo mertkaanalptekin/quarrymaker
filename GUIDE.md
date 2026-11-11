@@ -99,7 +99,7 @@ The steps:
 | 4 | Builds the Blender terrain | The terrain looks right |
 | 5 | Makes the Gaea package | The red box covers the area |
 | 6 | Measures and checks everything | All checks pass |
-| 7 | Calculates the benches | The coloured pit area covers the quarry; the benches look plausible |
+| 7 | Calculates the benches | The bench evidence map: green where benches were found. The benches look plausible. |
 
 Downloads are kept, so running again is quick.
 
@@ -123,6 +123,25 @@ Press **Open in Blender** or **Open folder**.
 **Gaea**
 - Follow `README_gaea.md` in the Gaea folder. It tells you exactly which width and height to enter.
 
+## About step 7 (benches)
+
+Step 7 looks at your pit **region by region**, in squares of about 400 m. A big mining complex has
+several pits and waste dumps, each with its own bench levels, and some parts may have been dug
+after the elevation data was captured (2011–2015).
+
+- **Green regions:** benches were found and are built in the model.
+- **Amber regions:** something bench-like was seen, but it was not convincing enough.
+- **Red regions:** no bench pattern.
+
+Wherever there is no green, the model keeps the measured terrain; the program never invents benches.
+Each pit or dump gets its own bench height and floor elevations, listed in the report.
+
+If step 7 stops with "no consistent bench pattern", your other results (steps 1–6) are complete
+and usable. Look at the bench evidence image, then:
+- if you know the bench height, enter it in step 2 and run step 7 again;
+- if most of the quarry was dug after 2015, the elevation data is simply too old to show its
+  benches; untick "Calculate the benches".
+
 ## If something goes wrong
 
 The app shows a red box with what stopped and **what to do**. The common ones:
@@ -134,7 +153,7 @@ The app shows a red box with what stopped and **what to do**. The common ones:
 | Blender not found | Pick or type the Blender location in step 2. |
 | Area too large | Draw a smaller rectangle. |
 | No quarry pit was found | Trace the pit outline in step 1. |
-| No consistent bench pattern | The benches are not clear in the photo. Enter the bench height in step 2, or trace the pit outline. |
+| No consistent bench pattern | No part of the pit showed clear benches. See "About step 7" above. Steps 1–6 are still complete. |
 
 If you are stuck, send the red message and a screenshot of the check images to your helper. Never
 send your key.

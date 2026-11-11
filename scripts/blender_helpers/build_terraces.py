@@ -112,10 +112,11 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     mat_conf = bl.attribute_material("MAT_terrace_confidence", "confidence",
                                      [(0.0, (0.85, 0.15, 0.1, 1)), (0.5, (0.95, 0.8, 0.2, 1)),
                                       (1.0, (0.1, 0.7, 0.25, 1))])
+    # classes 0 outside, 1 floor, 2 bench, 3 face, 4 water, 5 pit without clear benches
     mat_cls = bl.attribute_material("MAT_terrace_class", "terrace_class_f",
-                                    [(0.0, (0.5, 0.5, 0.5, 1)), (0.25, (0.3, 0.6, 1.0, 1)),
-                                     (0.5, (1.0, 0.85, 0.25, 1)), (0.75, (0.9, 0.25, 0.15, 1)),
-                                     (1.0, (0.15, 0.35, 1.0, 1))])
+                                    [(0.0, (0.5, 0.5, 0.5, 1)), (0.2, (0.3, 0.6, 1.0, 1)),
+                                     (0.4, (1.0, 0.85, 0.25, 1)), (0.6, (0.9, 0.25, 0.15, 1)),
+                                     (0.8, (0.15, 0.35, 1.0, 1)), (1.0, (0.75, 0.75, 0.8, 1))])
     mat_conf.use_fake_user = True
     mat_cls.use_fake_user = True
 
@@ -123,7 +124,7 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     me = bl.grid_mesh("TERRAIN_terraced", z, xs, ys, ext, origin)
     bl.add_point_attribute(me, "confidence", data["confidence"])
     bl.add_point_attribute(me, "terrace_class", data["classes"], "INT")
-    bl.add_point_attribute(me, "terrace_class_f", data["classes"].astype("float32") / 4.0)
+    bl.add_point_attribute(me, "terrace_class_f", data["classes"].astype("float32") / 5.0)
     bl.add_point_attribute(me, "dz_interp", data["dz"])
     me.materials.append(mat)
     coll = bpy.data.collections.new("10_terraces")

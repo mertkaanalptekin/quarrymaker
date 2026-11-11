@@ -49,4 +49,8 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   pit_min_local_relief_m: 3
   margin_m: 150             # mesh = pit bbox + margin
   mesh_max_vertices: 3000000
-  require_significant: true # stop and ask when no bench pattern is visible (auto height)
+  require_significant: true # stop and ask when no part of the pit shows a bench pattern
+  region_size_m: 400        # benches are tested region by region (several pits/dumps, newer digging)
+  min_significance: 2.0     # a region's pattern must beat shifted edge maps by this factor
+  bare_ground_only: true    # look for benches on bare rock/soil only, not on vegetation
+  max_bench_width_m: 60     # wider implied bench floors are not quarry benches

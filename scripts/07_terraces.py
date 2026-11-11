@@ -51,10 +51,15 @@ DEFAULTS = {
     "feather_m": 8.0,
     "margin_m": 150.0,              # mesh extent = pit bbox + margin
     "mesh_max_vertices": 3000000,
-    "require_significant": True,    # stop (ask) when no bench pattern is found and H is auto
+    "require_significant": True,    # stop (ask) when no region shows a bench pattern
+    "region_size_m": 400.0,         # benches are tested region by region (50% overlap)
+    "min_significance": 2.0,        # region evidence must beat shifted edge maps by this factor
+    "bare_ground_only": True,       # look for benches only on bare rock/soil, not vegetation
+    "max_bench_width_m": 60.0,      # wider implied bench floors are not quarry benches
 }
 
-CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water"}
+CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water",
+               5: "pit, no clear benches (measured kept)"}
 
 
 def tcfg(cfg) -> dict:
@@ -188,6 +193,12 @@ def main(argv=None) -> int:
     feather = T.smoothstep(T.gauss(mask.astype(float), float(tc["feather_m"]) / res), 0.5, 0.95)
     min_slope = float(tc["min_slope_deg"])
     zone = mask & (slope >= min_slope)
+    if tc.get("bare_ground_only", True):
+        bare = T.bare_ground(rgb, res, mask)
+        n_before = int(zone.sum())
+        zone &= bare
+        log.info("Bench analysis on bare ground only: %.0f%% of the pit's slopes (vegetated slopes "
+                 "inside the outline are left out)", 100.0 * zone.sum() / max(1, n_before))
 
     # ---------------- 2. edges ----------------------------------------------
     E = T.contour_edge_score(lum, zs, res)
@@ -195,51 +206,130 @@ def main(argv=None) -> int:
     En = np.clip(E / (cap + 1e-12), 0, 1)
     w = np.where(zone, En ** 2, 0.0)
 
-    # ---------------- 3. bench height & levels --------------------------------
+    # ---------------- 3. bench height & levels (region by region) ---------------
     zl = T.gauss(z0, 1.0)
     hmin, hmax = (float(v) for v in tc["bench_height_range_m"])
-    est = T.estimate_bench_height(zl[zone], w[zone], np.ones(int(zone.sum())), hmin, hmax)
     auto = str(tc["bench_height_m"]).lower() == "auto"
-    if auto:
-        Hb = est["H"]
-    else:
-        Hb = float(tc["bench_height_m"])
-        est_fixed = T.estimate_bench_height(zl[zone], w[zone], np.ones(int(zone.sum())), Hb, Hb)
-        est["edge_level_m"] = est_fixed["edge_level_m"]
-    # significance: real score vs scores after shifting the edge map against the DEM
-    nulls = T.null_scores(zl, w, zone, hmin, hmax)
-    null_max = max(nulls) if nulls else 0.0
-    significance = est["score"] / max(null_max, 1e-6)
-    weak = significance < 1.5 or est["score"] < 0.05
-    log.info("Bench signal score %.3f vs best of %d shifted (null) maps %.3f -> x%.1f",
-             est["score"], len(nulls), null_max, significance)
-    if weak:
-        msg = (f"No consistent bench pattern in the imagery (score {est['score']:.3f} vs "
-               f"{null_max:.3f} for shifted maps, x{significance:.1f}; need x1.5).")
-        if auto and tc.get("require_significant", True):
+    fixed_h = None if auto else float(tc["bench_height_m"])
+    sig_min = float(tc["min_significance"])
+    # height and level estimates trust the straight middle of the walls most
+    wp = T.planar_weights(w, zs, zone, res)
+    tiles = T.regional_scan(zl, wp, zone, res, float(tc["region_size_m"]), hmin, hmax, fixed_h=fixed_h)
+    for i_, t_ in enumerate(tiles):
+        t_["_i"] = i_
+    sig_tiles = [t for t in tiles if T.tile_is_significant(t, sig_min)]
+    log.info("Tested %d regions of %.0f m: %d show a clear bench pattern (x%.1f or more above "
+             "shifted edge maps)", len(tiles), float(tc["region_size_m"]), len(sig_tiles), sig_min)
+    od.mkdir(parents=True, exist_ok=True)
+    ev_img = evidence_image(paths, rgb, mask, tiles, sig_min)
+    forced = False
+    if not sig_tiles:
+        diag = diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h)
+        msg = (f"No region of the pit shows a consistent bench pattern ({len(tiles)} regions tested; "
+               f"best x{max([t['sig'] for t in tiles], default=0):.1f}, need x{sig_min:.1f}).")
+        if tc.get("require_significant", True):
+            common.fail_stage(paths, cfg, "07", [msg, "See the bench evidence map (red = no pattern)."],
+                              [ev_img] + diag, log)
             raise common.PipelineError(
-                msg + " Benches are not visible enough to calculate them. If you know the bench "
-                "height, set terraces.bench_height_m (levels are then still taken from the "
-                "imagery), check the pit mask (terraces.pit_mask), or set terraces.enabled: false.")
-        log.warning(msg + " Continuing because the bench height was given / require_significant is off; "
-                    "the geometry is LOW CONFIDENCE.")
-    log.info("Bench height %.2f m (%s); coherence R=%.3f vs baseline %.3f; edge level %.2f m mod H",
-             Hb, "estimated" if auto else "from config", est["R"], est["R_baseline"],
-             est["edge_level_m"])
-    # Benches are mined at fixed elevations, so the bench levels stay GLOBAL
-    # (G + n*H). Where the imagery shows the edges off those levels, the DEM is
-    # locally biased: that offset (wrapped to +-H/2) corrects the surface.
-    G = est["edge_level_m"]
-    level, conf = T.local_levels(zl, w, Hb, float(tc["local_window_m"]) / res, G)
-    delta = (level - G + Hb / 2) % Hb - Hb / 2
+                msg + " Look at the bench evidence map. Common reasons: the benches are not sharp "
+                "in the satellite image, or the area was dug after the elevation data was captured "
+                "(2011-2015 for COP30). If you know the bench height, enter it. You can also set "
+                "terraces.require_significant: false to build benches anyway (low confidence), or "
+                "terraces.enabled: false to skip this step.")
+        log.warning(msg + " Building anyway because require_significant is off: LOW CONFIDENCE.")
+        forced = True
+        for t in tiles:
+            t["sig"] = max(t["sig"], sig_min)  # treat all tested regions as evidence
+        sig_tiles = tiles
+    # Bench zones = connected regions with matching heights and levels (usually
+    # one pit or dump each). Each zone gets ONE bench height and ONE level
+    # system, estimated from all its regions together and tested again.
+    groups = T.tile_zones(tiles, sig_min)
+    n_first = len(groups)
+    groups = T.merge_zones(zl, wp, zone, tiles, groups, fixed_h=fixed_h)
+    if len(groups) < n_first:
+        log.info("Merged %d candidate zones into %d (same bench levels)", n_first, len(groups))
+    if forced and not groups:
+        groups = [list(range(len(tiles)))]
+    zones, zone_info, dropped = [], [], 0
+    for g in groups:
+        sol = T.zone_solution(zl, wp, zone, tiles, g, fixed_h=fixed_h)
+        if sol["sig"] < sig_min and not forced:
+            dropped += 1
+            log.info("Candidate bench zone of %d regions dropped: zone test x%.1f < x%.1f",
+                     len(g), sol["sig"], sig_min)
+            continue
+        # plausibility: real quarry benches have floors a few to some tens of
+        # metres wide, and a height inside the search range (not at its edge)
+        zsel = np.zeros(zone.shape, bool)
+        for ti in g:
+            t_ = tiles[ti]
+            zsel[t_["r0"]:t_["r1"], t_["c0"]:t_["c1"]] = True
+        zsel &= zone
+        wall = float(np.median(slope[zsel])) if zsel.any() else 0.0
+        width = sol["H"] / math.tan(math.radians(max(wall, 1.0))) - sol["H"] / math.tan(
+            math.radians(float(tc["face_angle_deg"])))
+        at_edge = auto and (sol["H"] <= hmin + 0.3 or sol["H"] >= hmax - 0.3)
+        if (width > float(tc["max_bench_width_m"]) or at_edge) and not forced:
+            dropped += 1
+            log.info("Candidate bench zone of %d regions dropped as implausible: height %.1f m%s, "
+                     "implied bench width %.0f m on %.0f deg walls", len(g), sol["H"],
+                     " (edge of the search range)" if at_edge else "", width, wall)
+            continue
+        zones.append((g, sol))
+    ev_img = evidence_image(paths, rgb, mask, tiles, sig_min,
+                            accepted={i_ for g_, _ in zones for i_ in g_})
+    if not zones:
+        diag = diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h)
+        msg = ("Some regions looked promising, but no pit-wide bench pattern passed the test "
+               f"({dropped} candidate zone(s) dropped).")
+        common.fail_stage(paths, cfg, "07", [msg], [ev_img] + diag, log)
+        raise common.PipelineError(
+            msg + " There is no consistent bench pattern to build from. Look at the bench evidence map. "
+            "If you know the bench height, enter it; or set terraces.enabled: false.")
+    zidx, evidence = T.zone_fields(tiles, [g for g, _ in zones], (H, W))
+    Hz_arr = np.array([sol["H"] for _, sol in zones])
+    Gz_arr = np.array([sol["level"] for _, sol in zones])
+    Hf = np.where(zidx >= 0, Hz_arr[np.maximum(zidx, 0)], Hz_arr[0]).astype("float64")
+    Gz = np.where(zidx >= 0, Gz_arr[np.maximum(zidx, 0)], Gz_arr[0]).astype("float64")
+    # fine local correction of the DEM towards each zone's fixed levels (+-H/2)
+    L, conf = T.local_levels(zl, w, Hf, float(tc["local_window_m"]) / res, Gz)
+    delta = (L - Gz + Hf / 2) % Hf - Hf / 2
+    G = Gz
+    weak = forced
+    for zi, (g, sol) in enumerate(zones):
+        Hz, Gzv = sol["H"], sol["level"]
+        sub = mask & (zidx == zi) & (evidence > 0.5)
+        zz = z0[sub]
+        fl = []
+        if zz.size:
+            n0 = int(math.floor((float(zz.min()) - Gzv) / Hz - 0.5))
+            n1 = int(math.ceil((float(zz.max()) - Gzv) / Hz - 0.5))
+            fl = [round(Gzv + (n + 0.5) * Hz, 1) for n in range(n0, n1 + 1)
+                  if zz.min() - Hz / 2 <= Gzv + (n + 0.5) * Hz <= zz.max() + Hz / 2]
+        rows_, cols_ = np.where(sub) if zz.size else (np.array([0]), np.array([0]))
+        zone_info.append({"zone": zi + 1, "regions": len(g), "bench_height_m": round(Hz, 2),
+                          "level_mod_H_m": round(Gzv, 2), "floor_levels_m": fl,
+                          "significance": round(sol["sig"], 1), "area_ha": round(float(sub.sum()) * res * res / 1e4, 1),
+                          "bbox_crs": [round(e["xmin"] + cols_.min() * res), round(e["ymax"] - (rows_.max() + 1) * res),
+                                       round(e["xmin"] + (cols_.max() + 1) * res), round(e["ymax"] - rows_.min() * res)]})
+        log.info("Bench zone %d: %d regions, %.1f ha, bench height %.2f m, zone test x%.1f, floors %s",
+                 zi + 1, len(g), zone_info[-1]["area_ha"], Hz, sol["sig"],
+                 ", ".join(f"{v:.1f}" for v in fl[:12]) + (" ..." if len(fl) > 12 else ""))
+    main = zones[0][0]
+    Hmain = zones[0][1]["H"]
+    floors = zone_info[0]["floor_levels_m"]
+    est = main_spectrum(zl, wp, zone, tiles, main, hmin, hmax)
+    Hb = Hmain
 
     # ---------------- 4. staircase --------------------------------------------
     alpha = math.radians(float(tc["face_angle_deg"]))
     phi = np.clip(np.tan(np.radians(slope)) / math.tan(alpha), 0.05, 0.95)
     # steps are built on the measured surface itself (lightly filtered) so the
     # result is volume-neutral; the smoothed surface only gives slope/direction
-    z_st, face, bench_n = T.staircase(zl - delta, G, Hb, phi)
-    wb = feather * T.smoothstep(slope, min_slope, min_slope + 4.0)
+    z_st, face, bench_n = T.staircase(zl - delta, G, Hf, phi)
+    # benches only where the surrounding regions show evidence; elsewhere measured
+    wb = feather * T.smoothstep(slope, min_slope, min_slope + 4.0) * evidence
     zt = z0 + wb * (z_st - z0)
 
     # water (dark, bluish ponds inside the pit) -> flat surface
@@ -258,10 +348,11 @@ def main(argv=None) -> int:
     classes[mask] = 1
     classes[mask & (wb > 0.5) & ~face] = 2
     classes[mask & (wb > 0.5) & face] = 3
+    classes[mask & (slope >= min_slope) & (evidence <= 0.5)] = 5
     if n_water:
         classes[mask & (labels > 0)] = 4
     dz = zt - z0
-    confidence = np.where(mask, conf, 0.0)
+    confidence = np.where(mask, conf * evidence, 0.0)
 
     # ---------------- work extent for the mesh ---------------------------------
     rows_any = np.where(mask.any(1))[0]
@@ -309,11 +400,6 @@ def main(argv=None) -> int:
         np.savez(patch, z=zt[sl].astype("float32"), confidence=confidence[sl].astype("float32"),
                  classes=classes[sl].astype("int32"), dz=dz[sl].astype("float32"))
     zone_dz = dz[mask & (wb > 0.5)]
-    zpit = zt[mask]
-    n0 = int(math.floor((float(zpit.min()) - G) / Hb - 0.5))
-    n1 = int(math.ceil((float(zpit.max()) - G) / Hb - 0.5))
-    floors = [round(G + (n + 0.5) * Hb, 2) for n in range(n0, n1 + 1)
-              if zpit.min() - Hb / 2 <= G + (n + 0.5) * Hb <= zpit.max() + Hb / 2]
     params = {
         "run_id": paths.run_id,
         "config_hash": common.config_hash(cfg),
@@ -325,16 +411,25 @@ def main(argv=None) -> int:
                   "ymax": e["ymax"] - r0 * res, "ymin": e["ymax"] - r1 * res},
         "bench_height_m": Hb,
         "bench_height_source": "estimated from imagery+DEM" if auto else "config",
-        "bench_level_mod_H_m": G,
+        "bench_level_mod_H_m": zone_info[0]["level_mod_H_m"] if zone_info else None,
         "bench_floor_levels_m": floors,
-        "bench_level_note": ("Bench floors are flat at G + (n + 0.5) * H; face centres at G + n * H. "
-                             "Levels are global (fixed elevations); the DEM surface is shifted locally "
-                             "by up to +-H/2 to meet them (surface_correction.tif)."),
+        "bench_zones": zone_info,
+        "bench_level_note": ("Each bench zone (connected regions with evidence, usually one pit or "
+                             "dump) has its own fixed levels: floors at G + (n + 0.5) * H. The DEM "
+                             "surface is shifted locally by up to +-H/2 to meet them "
+                             "(surface_correction.tif). Values above are for the largest zone."),
+        "regions": {"size_m": float(tc["region_size_m"]), "tested": len(tiles),
+                    "with_benches": sum(1 for t in tiles if T.tile_is_significant(t, sig_min)),
+                    "min_significance": sig_min,
+                    "pit_area_with_benches_pct": float(100 * (evidence[zone] > 0.5).mean()) if zone.any() else 0.0,
+                    "list": [{k2: (round(v, 3) if isinstance(v, float) else v) for k2, v in t.items()
+                              if k2 not in ("curve", "hs", "_i")} for t in tiles]},
         "surface_correction_m": {"mean": float(-(delta * wb)[zone].mean()) if zone.any() else 0.0,
                                  "abs_mean": float(np.abs(delta * wb)[zone].mean()) if zone.any() else 0.0},
         "coherence_R": est["R"], "coherence_baseline": est["R_baseline"],
-        "signal_score": est["score"], "null_scores": nulls,
-        "coherence_significance": significance, "low_confidence": bool(weak),
+        "signal_score": est["score"],
+        "coherence_significance": float(max([t["sig"] for t in tiles], default=0.0)),
+        "low_confidence": bool(weak),
         "face_angle_deg": float(tc["face_angle_deg"]),
         "face_angle_source": "config (not measurable from imagery)",
         "mean_overall_slope_deg": float(slope[zone].mean()) if zone.any() else None,
@@ -349,7 +444,7 @@ def main(argv=None) -> int:
                              "std": float(zone_dz.std()) if zone_dz.size else 0.0,
                              "min": float(zone_dz.min()) if zone_dz.size else 0.0,
                              "max": float(zone_dz.max()) if zone_dz.size else 0.0},
-        "mean_confidence_in_pit": float(conf[mask].mean()),
+        "mean_confidence_in_pit": float((conf * evidence)[mask].mean()),
         "settings": {k2: tc[k2] for k2 in DEFAULTS},
         "base_hashes_before": base_hashes,
         "spectrum": {"h_values": est["h_values"].round(3).tolist(),
@@ -361,8 +456,8 @@ def main(argv=None) -> int:
     files.append(params_p)
 
     # ---------------- check images ------------------------------------------
-    imgs = check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, confidence, est, Hb,
-                        res, (r0, r1, c0, c1), log)
+    imgs = [ev_img] + check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, confidence, est, Hb,
+                                   res, (r0, r1, c0, c1), log)
 
     # ---------------- Blender ------------------------------------------------
     blender, _ = common.find_blender(cfg)
@@ -425,9 +520,12 @@ def main(argv=None) -> int:
     report.write_text(make_report(paths, meta, params, checks, br, imgs, files), encoding="utf-8")
     summary = [
         f"Pit: {mask_info['area_m2'] / 1e4:.1f} ha ({mask_info['source']}); water bodies {n_water}",
-        f"Bench floors at {', '.join(f'{v:.1f}' for v in floors)} m",
-        f"Bench height {Hb:.2f} m ({params['bench_height_source']}), coherence {est['R']:.3f} "
-        f"(baseline {est['R_baseline']:.3f}){' - LOW CONFIDENCE' if weak else ''}",
+        f"Benches found in {params['regions']['with_benches']} of {params['regions']['tested']} regions "
+        f"({params['regions']['pit_area_with_benches_pct']:.0f}% of the pit's slopes); the rest keeps the measured terrain",
+    ] + [f"Bench zone {z['zone']}: height {z['bench_height_m']:.1f} m, floors at "
+         f"{', '.join(f'{v:.1f}' for v in z['floor_levels_m'][:15])}{' ...' if len(z['floor_levels_m']) > 15 else ''} m"
+         for z in zone_info[:6]] + [
+        f"Main bench height {Hb:.2f} m ({params['bench_height_source']}){' - LOW CONFIDENCE' if weak else ''}",
         f"Face angle {tc['face_angle_deg']} deg (config); mean overall pit slope "
         f"{params['mean_overall_slope_deg'] or 0:.1f} deg; implied bench width "
         f"{params['implied_bench_width_m_mean'] or 0:.1f} m",
@@ -444,6 +542,82 @@ def main(argv=None) -> int:
                         log, extra={"terraces": {k2: params[k2] for k2 in
                                                  ("bench_height_m", "coherence_R", "low_confidence")}})
     return 0
+
+
+def main_spectrum(zl, w, zone, tiles, main, hmin, hmax):
+    """Spectrum over the main bench zone (for the check image and the report)."""
+    import numpy as np
+
+    import terraces as T
+    sel = np.zeros(zone.shape, bool)
+    for i in main:
+        t = tiles[i]
+        sel[t["r0"]:t["r1"], t["c0"]:t["c1"]] = True
+    sel &= zone
+    if not sel.any():
+        sel = zone
+    return T.estimate_bench_height(zl[sel], w[sel], np.ones(int(sel.sum())), hmin, hmax)
+
+
+def evidence_image(paths, rgb, mask, tiles, sig_min, accepted=None):
+    """Map of the tested regions, written whether or not the stage succeeds.
+    green = benches built, amber = a possible pattern that did not pass the
+    pit-wide test (or a weak one), red = no pattern. `accepted`: indices of the
+    regions in accepted bench zones (None = before the zone test)."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    import terraces as T
+    H, W = mask.shape
+    s = min(1.0, 1400 / max(H, W))
+    img = Image.fromarray((rgb.astype(float) * 0.55 + 40).astype("uint8")).resize(
+        (max(1, int(W * s)), max(1, int(H * s))))
+    over = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(over)
+    for t in sorted(tiles, key=lambda t: t["sig"]):
+        ok = T.tile_is_significant(t, sig_min)
+        if ok and (accepted is None or t["_i"] in accepted):
+            col = (40, 200, 90)
+        elif ok or t["sig"] >= sig_min * 0.75:
+            col = (240, 180, 40)
+        else:
+            col = (220, 60, 50)
+        # draw the central half of each region (regions overlap by 50%)
+        h4, w4 = (t["r1"] - t["r0"]) / 4, (t["c1"] - t["c0"]) / 4
+        box = [(t["c0"] + w4) * s, (t["r0"] + h4) * s, (t["c1"] - w4) * s, (t["r1"] - h4) * s]
+        d.rectangle(box, fill=col + (110,), outline=col + (255,))
+    m = Image.fromarray((mask * 255).astype("uint8")).resize(img.size)
+    edge = np.asarray(m.filter(__import__("PIL.ImageFilter", fromlist=["FIND_EDGES"]).FIND_EDGES)) > 60
+    o = np.asarray(over).copy()
+    o[edge] = (255, 255, 255, 255)
+    img = Image.alpha_composite(img.convert("RGBA"), Image.fromarray(o)).convert("RGB")
+    dd = ImageDraw.Draw(img)
+    dd.rectangle([8, 8, 470, 62], fill=(255, 255, 255))
+    dd.text((14, 12), "Bench evidence per region:", fill=(0, 0, 0))
+    dd.text((14, 28), "green = benches built, amber = possible but not confirmed, red = none", fill=(0, 0, 0))
+    dd.text((14, 44), "white line = pit outline", fill=(0, 0, 0))
+    p = paths.checks / "07_bench_evidence.png"
+    img.save(p)
+    return p
+
+
+def diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h):
+    """Images written when no region shows benches, to help decide what to do."""
+    import numpy as np
+    from PIL import Image
+
+    rows = np.where(mask.any(1))[0]
+    cols = np.where(mask.any(0))[0]
+    crop = (slice(rows[0], rows[-1] + 1), slice(cols[0], cols[-1] + 1))
+    a = Image.fromarray(rgb[crop])
+    b = Image.fromarray((np.clip(En[crop], 0, 1) ** 0.5 * 255).astype("uint8")).convert("RGB")
+    two = Image.new("RGB", (2 * a.width + 10, a.height), "white")
+    two.paste(a, (0, 0))
+    two.paste(b, (a.width + 10, 0))
+    two.thumbnail((1600, 1600))
+    p = paths.checks / "07_contour_edges.png"
+    two.save(p)
+    return [p]
 
 
 def _load(name, file):
@@ -471,7 +645,8 @@ def check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, conf, est, Hb, r
         return im
 
     # 1. pit mask + classes over the imagery
-    pal = np.array([[0, 0, 0], [80, 160, 255], [255, 210, 60], [230, 60, 40], [40, 90, 255]], "uint8")
+    pal = np.array([[0, 0, 0], [80, 160, 255], [255, 210, 60], [230, 60, 40], [40, 90, 255],
+                    [190, 190, 200]], "uint8")
     cl = classes[crop]
     over = rgb[crop].astype(float)
     m = cl > 0
@@ -564,11 +739,17 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "base terrain in `terrain/00_base/` is unchanged.",
         "",
         "## Result",
-        f"- Bench height: **{p['bench_height_m']:.2f} m** ({p['bench_height_source']}); coherence "
-        f"{p['coherence_R']:.3f} vs baseline {p['coherence_baseline']:.3f} "
-        f"; signal x{p['coherence_significance']:.1f} above shifted-map null"
-        f"{' - **low confidence**' if p['low_confidence'] else ''}",
-        f"- Bench floor elevations (global): {', '.join(f'{v:.1f}' for v in p['bench_floor_levels_m'])} m",
+        f"- Regions of {p['regions']['size_m']:.0f} m tested: {p['regions']['tested']}; with a clear bench "
+        f"pattern: {p['regions']['with_benches']}. Benches are built on "
+        f"{p['regions']['pit_area_with_benches_pct']:.0f}% of the pit's slopes; the rest keeps the measured "
+        f"terrain (`07_bench_evidence.png`).{' **Low confidence (forced build).**' if p['low_confidence'] else ''}",
+        "",
+        "| bench zone | area | bench height | zone test | floor elevations (m) |",
+        "|---|---|---|---|---|",
+        *[f"| {z['zone']} | {z['area_ha']:.1f} ha | {z['bench_height_m']:.2f} m ({p['bench_height_source']}) | "
+          f"x{z['significance']:.1f} | {', '.join(f'{v:.1f}' for v in z['floor_levels_m'])} |"
+          for z in p["bench_zones"]],
+        "",
         f"- Local surface correction to meet the levels: mean {p['surface_correction_m']['mean']:+.2f} m, "
         f"mean abs {p['surface_correction_m']['abs_mean']:.2f} m (`surface_correction.tif`)",
         f"- Face angle: {p['face_angle_deg']:g} deg ({p['face_angle_source']})",
@@ -594,7 +775,8 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "`quarry_terraced.blend` uses the same BlenderGIS georeference (SRID, crs x/y) and origin as "
         "the base, so it lines up with `quarry_base.blend` and with BlenderGIS imports.",
         "- `10_terraces/TERRAIN_terraced`: interpreted mesh. Point attributes: `confidence` (0..1), "
-        "`terrace_class` (0 outside, 1 floor, 2 bench, 3 face, 4 water), `dz_interp` (m).",
+        "`terrace_class` (0 outside, 1 floor, 2 bench, 3 face, 4 water, 5 pit without clear "
+        "benches = measured kept), `dz_interp` (m).",
         "- Materials: `MAT_terrain_ortho` (imagery), `MAT_terrace_confidence` and "
         "`MAT_terrace_class` (switch the material to inspect).",
         "- `00_base_context/TERRAIN_base_context`: the measured 30 m terrain with a hole under the patch.",
@@ -607,16 +789,21 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "lines running along the contours like bench crests and toes.",
         "3. Bench height: benches are mined at fixed elevations, so edge strength projected onto "
         "elevation repeats every H. H maximises the coherence |sum w exp(2 pi i z/H)| / sum w "
-        "above the baseline of the elevation distribution itself. Significance: the same score "
-        "after shifting the edge map against the DEM (8 shifts) must be clearly lower (x1.5).",
-        "4. Levels: the phase of that sum gives the bench elevations G + n*H. They stay global (benches "
-        "are mined at fixed elevations); where the imagery puts the edges off these levels, the DEM "
-        "surface is shifted locally (by at most H/2) to meet them.",
+        "above the baseline of the elevation distribution itself (edges on straight wall parts "
+        "weigh more).",
+        "4. Region by region: the pattern is tested in overlapping regions and must beat shifted "
+        "edge maps (circular and spatial shifts) by the configured factor. Agreeing regions form "
+        "bench zones (usually one pit or dump each), which are re-tested as a whole and checked for "
+        "plausible bench widths. Each zone gets one bench height and one set of fixed floor "
+        "elevations G + (n + 0.5)*H; the DEM surface is shifted locally (by at most H/2) to meet "
+        "them. Regions without evidence keep the measured terrain.",
         "5. Staircase: on the smoothed DEM surface, faces at the face angle take a fraction "
         "tan(slope)/tan(face angle) of each bench period; floors are flat. It is volume-neutral "
         "relative to the smooth surface.",
         "",
         "## Limitations",
+        "- Small pits, whose walls are only a few 30 m DEM cells wide, are less reliable (the DEM "
+        "squeezes their elevations; the bench height can come out a few percent low).",
         "- Horizontal bench positions follow the smoothed 30 m DEM contours, shifted by the image-derived "
         "levels. Benches that curve more tightly than ~30 m in plan are simplified.",
         "- The DEM predates the imagery: where the pit has expanded since the DEM, the imagery shows "

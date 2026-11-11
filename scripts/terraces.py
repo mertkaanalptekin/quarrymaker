@@ -174,6 +174,28 @@ def detect_pit(rgb, slope_deg, z0, transform, res, *, threshold=None, min_area_m
     return mask, keep, info
 
 
+def bare_ground(rgb, res, within, smooth_m=12.0, min_gap=0.04):
+    """Bare rock / soil inside `within` (benches are cut into bare ground, so
+    vegetated slopes inside a large hand-drawn outline are left out).
+
+    Uses colour saturation, which, unlike brightness, barely changes between
+    sunlit and shadowed rock. The saturation inside the outline is split in two
+    (Otsu); the split is used only when the two groups clearly differ (bare
+    rock and vegetation both present). Otherwise everything is kept."""
+    _, _, sat, _ = quarry_index(rgb)
+    has = rgb.max(-1) > 0
+    ss = gauss(np.where(has, sat, 0), smooth_m / res)
+    inside = within & has
+    if inside.sum() < 100:
+        return inside
+    v = ss[inside]
+    t = otsu(v)
+    lo, hi = v[v < t], v[v >= t]
+    if lo.size < 0.05 * v.size or hi.size < 0.05 * v.size or float(hi.mean() - lo.mean()) < min_gap:
+        return inside
+    return inside & (ss < t)
+
+
 # ----------------------------------------------------------------------
 # 2. Edge score
 # ----------------------------------------------------------------------
@@ -256,7 +278,8 @@ def null_scores(z, w, zone, h_min, h_max, n=8, seed=0, step=0.05):
 
 
 def local_levels(z, w, H, sigma_px, global_level, prior=0.05):
-    """Field of local 'face-centre' level (mod H) and its confidence 0..1."""
+    """Field of local 'face-centre' level (mod H) and its confidence 0..1.
+    H and global_level may be scalars or per-pixel arrays."""
     e = w * np.exp(2j * np.pi * z / H)
     cw = gauss_complex(e, sigma_px)
     ww = gauss(w, sigma_px) + 1e-12
@@ -289,6 +312,291 @@ def staircase(z0, level, H, phi):
     return level + H * g, face, n.astype("int32")
 
 
+def planar_weights(w, z_smooth, zone, res):
+    """Down-weight edges where the smoothed surface is strongly curved (pit rim
+    and floor). There a 30 m DEM squeezes elevations, which biases the bench
+    height low; on the straight middle of a wall it does not."""
+    gr, gc = np.gradient(z_smooth, res)
+    grr, _ = np.gradient(gr, res)
+    _, gcc = np.gradient(gc, res)
+    lap = np.abs(grr + gcc)
+    lap0 = float(np.median(lap[zone])) if zone.any() else 1.0
+    return w / (1.0 + (lap / max(lap0, 1e-9)) ** 2)
+
+
 def overall_slope_deg(z_smooth, res):
     gr, gc = np.gradient(z_smooth, res)
     return np.degrees(np.arctan(np.hypot(gr, gc)))
+
+
+# ----------------------------------------------------------------------
+# Regional analysis (large or multi-pit complexes)
+# ----------------------------------------------------------------------
+# A mining complex holds several pits and dumps, each with its own bench
+# levels (and sometimes its own bench height), plus areas excavated after
+# the DEM was captured. One global periodicity mixes them until it cancels
+# out, so the pattern is tested region by region instead. Benches are built
+# only where a region shows significant evidence; elsewhere the measured
+# terrain is kept.
+
+
+def _neff(w):
+    s = float(w.sum())
+    return s * s / max(float((w * w).sum()), 1e-12)
+
+
+def _null_scores(spec, Rb, w2d, zone2d, wf, rng, n_null):
+    """Best spectrum scores of edge maps that cannot carry a real bench signal.
+
+    Two kinds, and the stricter wins:
+      * circular shift of the weights along the zone pixels (same evidence
+        meets other elevations);
+      * spatial shift of the edge map (keeps regular line patterns such as
+        field or road grids, which on a uniform slope also look periodic in
+        elevation). Shifts that pile the evidence onto few pixels are skipped,
+        so the comparison stays fair."""
+    n = len(wf)
+    neff = _neff(wf)
+    out = []
+    for _ in range(n_null):
+        Rn, _ = spec(np.roll(wf, int(rng.uniform(0.2, 0.8) * n)))
+        out.append(float((Rn - Rb).max()))
+    hh, ww = zone2d.shape
+    got, tries = 0, 0
+    while got < n_null and tries < 6 * n_null:
+        tries += 1
+        dy = int(rng.uniform(0.15, 0.85) * hh) * int(rng.choice([-1, 1]))
+        dx = int(rng.uniform(0.15, 0.85) * ww) * int(rng.choice([-1, 1]))
+        wr = np.roll(np.roll(w2d, dy, 0), dx, 1)[zone2d]
+        if wr.sum() <= 0 or _neff(wr) < 0.6 * neff:
+            continue
+        Rn, _ = spec(wr)
+        out.append(float((Rn - Rb).max()))
+        got += 1
+    return out
+
+
+class _Spectrum:
+    """Coherence spectra of one region; the elevation->phase table is built
+    once and reused for the real and all shifted (null) weight maps."""
+
+    def __init__(self, z, h_values, bin_m=0.1):
+        lo = float(z.min())
+        nb = max(32, int((float(z.max()) - lo) / bin_m) + 1)
+        self.idx = np.clip(((z - lo) / bin_m).astype(np.int64), 0, nb - 1)
+        self.nb = nb
+        zc = lo + (np.arange(nb) + 0.5) * bin_m
+        self.E = np.exp(2j * np.pi * zc[None, :] / np.asarray(h_values, float)[:, None])
+
+    def __call__(self, w):
+        hist = np.bincount(self.idx, weights=w, minlength=self.nb)
+        c = self.E @ hist / (hist.sum() + 1e-12)
+        return np.abs(c), c
+
+
+def regional_scan(zl, w, zone, res, tile_m, h_min, h_max, fixed_h=None, n_null=8,
+                  min_zone_frac=0.08, seed=0, step_h=0.1):
+    """Test bench periodicity in overlapping square regions (50% overlap).
+
+    Returns a list of dicts: r0, r1, c0, c1 (pixel window), H, level (face-centre
+    level mod H), score (coherence above the elevation baseline), null (best
+    score of shifted edge maps), sig (score / null), n (bench-zone pixels)."""
+    rng = np.random.default_rng(seed)
+    hs = np.array([fixed_h], float) if fixed_h else np.arange(h_min, h_max + 1e-9, step_h)
+    tp = max(16, int(round(tile_m / res)))
+    step = max(8, tp // 2)
+    Hh, Ww = zone.shape
+    tiles = []
+    for r0 in range(0, max(1, Hh - step), step):
+        for c0 in range(0, max(1, Ww - step), step):
+            r1, c1 = min(Hh, r0 + tp), min(Ww, c0 + tp)
+            zt = zone[r0:r1, c0:c1]
+            n = int(zt.sum())
+            if n < max(500, min_zone_frac * zt.size):
+                continue
+            ww = w[r0:r1, c0:c1]
+            wf = ww[zt]
+            if wf.sum() <= 0:
+                continue
+            spec = _Spectrum(zl[r0:r1, c0:c1][zt], hs)
+            Re, Ce = spec(wf)
+            Rb, _ = spec(np.ones_like(wf))
+            score = Re - Rb
+            i = int(np.argmax(score))
+            nulls = _null_scores(spec, Rb, ww, zt, wf, rng, n_null)
+            null = max(nulls) if nulls else 0.0
+            H = float(hs[i])
+            tiles.append({"r0": r0, "r1": r1, "c0": c0, "c1": c1, "n": n, "H": H,
+                          "curve": score, "hs": hs,
+                          "level": float((np.angle(Ce[i]) / (2 * np.pi)) * H % H),
+                          "score": float(score[i]), "null": null,
+                          "sig": float(score[i] / max(null, 1e-6))})
+    return tiles
+
+
+def tile_is_significant(t, sig_min=1.5, score_min=0.05):
+    return t["sig"] >= sig_min and t["score"] >= score_min
+
+
+def tile_fields(tiles, shape, sig_lo=1.3, sig_hi=2.0, score_min=0.05):
+    """Blend tile results into smooth per-pixel fields with tent windows.
+
+    evidence: 0..1, how strongly the surrounding regions show benches.
+    H: bench height, weighted by evidence (NaN where no region has evidence)."""
+    num_e = np.zeros(shape, "float32")
+    den = np.zeros(shape, "float32")
+    num_h = np.zeros(shape, "float32")
+    den_h = np.zeros(shape, "float32")
+    for t in tiles:
+        h, w = t["r1"] - t["r0"], t["c1"] - t["c0"]
+        ty = 1 - np.abs(np.linspace(-1, 1, h + 2)[1:-1])
+        tx = 1 - np.abs(np.linspace(-1, 1, w + 2)[1:-1])
+        tri = np.outer(ty, tx).astype("float32")
+        e = float(smoothstep(t["sig"], sig_lo, sig_hi)) if t["score"] >= score_min else 0.0
+        sl = (slice(t["r0"], t["r1"]), slice(t["c0"], t["c1"]))
+        den[sl] += tri
+        if e > 0:
+            num_e[sl] += tri * e
+            num_h[sl] += tri * e * t["H"]
+            den_h[sl] += tri * e
+    evidence = np.where(den > 0, num_e / np.maximum(den, 1e-6), 0).astype("float32")
+    hfield = np.where(den_h > 0, num_h / np.maximum(den_h, 1e-6), np.nan).astype("float32")
+    return evidence, hfield
+
+
+def tile_zones(tiles, sig_min=1.5, score_min=0.05, h_tol=0.15):
+    """Group significant overlapping regions into 'bench zones' (usually one pit
+    or dump each). Two regions join only if their bench heights agree within
+    h_tol and their bench levels agree within a quarter bench, so neighbouring
+    pits with different level systems stay apart."""
+    sig = [i for i, t in enumerate(tiles) if tile_is_significant(t, sig_min, score_min)]
+    parent = {i: i for i in sig}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def compatible(ta, tb):
+        if not (ta["r0"] < tb["r1"] and tb["r0"] < ta["r1"] and ta["c0"] < tb["c1"] and tb["c0"] < ta["c1"]):
+            return False
+        hm = 0.5 * (ta["H"] + tb["H"])
+        if abs(ta["H"] - tb["H"]) > h_tol * hm:
+            # heights disagree: still the same pit if one tile's curve peaks near
+            # the other's height (noisy region)
+            ia = int(np.argmin(np.abs(ta["hs"] - tb["H"])))
+            ib = int(np.argmin(np.abs(tb["hs"] - ta["H"])))
+            if ta["curve"][ia] < 0.7 * ta["score"] and tb["curve"][ib] < 0.7 * tb["score"]:
+                return False
+        d = (ta["level"] - tb["level"] + hm / 2) % hm - hm / 2
+        return abs(d) <= hm / 4
+
+    for a in sig:
+        for b in sig:
+            if a < b and compatible(tiles[a], tiles[b]):
+                parent[find(a)] = find(b)
+    groups = {}
+    for i in sig:
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values(), key=lambda g: -sum(tiles[i]["n"] for i in g))
+
+
+def zone_solution(zl, w, zone, tiles, group, fixed_h=None, n_null=8, seed=1):
+    """Bench height and level system of one zone, from all its regions together,
+    plus a zone-level significance test (circular shift of the edge weights)."""
+    sel = np.zeros(zone.shape, bool)
+    for i in group:
+        t = tiles[i]
+        sel[t["r0"]:t["r1"], t["c0"]:t["c1"]] = True
+    sel &= zone
+    z = zl[sel]
+    wf = w[sel]
+    if fixed_h:
+        H = float(fixed_h)
+    else:
+        curve = np.sum([tiles[i]["curve"] * tiles[i]["n"] for i in group], axis=0)
+        H0 = float(tiles[group[0]]["hs"][int(np.argmax(curve))])
+        # refine on this zone's own pixels (0.02 m steps around the coarse peak)
+        hs = np.arange(max(1.0, H0 - 0.3), H0 + 0.3 + 1e-9, 0.02)
+        sp = _Spectrum(z, hs)
+        H = float(hs[int(np.argmax(sp(wf)[0] - sp(np.ones_like(wf))[0]))])
+    spec = _Spectrum(z, [H])
+    Re, Ce = spec(wf)
+    Rb, _ = spec(np.ones_like(wf))
+    score = float(Re[0] - Rb[0])
+    rng = np.random.default_rng(seed)
+    nulls = []
+    if n_null:
+        rows, cols = np.where(sel)
+        win = (slice(rows.min(), rows.max() + 1), slice(cols.min(), cols.max() + 1))
+        nulls = _null_scores(spec, Rb, w[win], sel[win], wf, rng, n_null)
+    null = max(max(nulls, default=0.0), 1e-6)
+    level = float((np.angle(Ce[0]) / (2 * np.pi)) * H % H)
+    return {"H": H, "level": level, "score": score, "null": null, "sig": score / null, "pixels": int(sel.sum())}
+
+
+def _groups_touch(tiles, ga, gb):
+    for a in ga:
+        ta = tiles[a]
+        for b in gb:
+            tb = tiles[b]
+            if ta["r0"] < tb["r1"] and tb["r0"] < ta["r1"] and ta["c0"] < tb["c1"] and tb["c0"] < ta["c1"]:
+                return True
+    return False
+
+
+def merge_zones(zl, w, zone, tiles, groups, fixed_h=None, keep=0.8):
+    """Merge neighbouring zones that share one level system.
+
+    Two touching zones are merged when the coherence of the union stays at
+    least `keep` x the pixel-weighted coherence of the two apart, i.e. their
+    benches really sit on the same elevations (one pit split by noise).
+    Different pits (other levels or heights) lose coherence and stay apart."""
+    groups = [list(g) for g in groups]
+    cache = {}
+
+    def sol(g):
+        key = tuple(sorted(g))
+        if key not in cache:
+            cache[key] = zone_solution(zl, w, zone, tiles, list(key), fixed_h=fixed_h, n_null=0)
+        return cache[key]
+    while True:
+        best = None
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                if not _groups_touch(tiles, groups[i], groups[j]):
+                    continue
+                a, b = sol(groups[i]), sol(groups[j])
+                u = sol(groups[i] + groups[j])
+                ref = (a["score"] * a["pixels"] + b["score"] * b["pixels"]) / max(1, a["pixels"] + b["pixels"])
+                ratio = u["score"] / max(ref, 1e-6)
+                if ratio >= keep and (best is None or ratio > best[0]):
+                    best = (ratio, i, j)
+        if best is None:
+            break
+        _, i, j = best
+        groups[i] = groups[i] + groups[j]
+        del groups[j]
+    return sorted(groups, key=lambda g: -sum(tiles[k]["n"] for k in g))
+
+
+def zone_fields(tiles, zones, shape):
+    """Per-pixel zone index (-1 = none) and evidence (0..1): each pixel belongs to
+    the zone whose significant region covers it most centrally."""
+    best = np.zeros(shape, "float32")
+    zidx = np.full(shape, -1, "int16")
+    for zi, g in enumerate(zones):
+        for i in g:
+            t = tiles[i]
+            h, w = t["r1"] - t["r0"], t["c1"] - t["c0"]
+            ty = 1 - np.abs(np.linspace(-1, 1, h + 2)[1:-1])
+            tx = 1 - np.abs(np.linspace(-1, 1, w + 2)[1:-1])
+            tri = np.outer(ty, tx).astype("float32")
+            sl = (slice(t["r0"], t["r1"]), slice(t["c0"], t["c1"]))
+            better = tri > best[sl]
+            best[sl] = np.where(better, tri, best[sl])
+            zidx[sl] = np.where(better, zi, zidx[sl])
+    # central half of a region (tent >= 0.25) counts fully; fade towards its edge
+    evidence = np.clip(best / 0.25, 0, 1).astype("float32")
+    return zidx, evidence

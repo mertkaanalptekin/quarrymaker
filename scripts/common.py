@@ -395,6 +395,21 @@ def finish_stage(paths: Paths, cfg: dict, stage: str, summary: list[str],
     return rec
 
 
+def fail_stage(paths: Paths, cfg: dict, stage: str, summary: list[str], check_images: list,
+               log: logging.Logger) -> dict:
+    """Record a stage that stopped on purpose, with its diagnostic images, so the
+    user can see why (the app shows them). Never counts as 'up to date'."""
+    rec = {
+        "stage": stage, "title": STAGE_TITLES[stage], "status": "failed", "run_id": paths.run_id,
+        "config_hash": config_hash(cfg), "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "summary": summary, "outputs": [], "check_images": [rel(paths, p) for p in check_images],
+    }
+    write_json(paths.stage_record(stage), rec)
+    for p in rec["check_images"]:
+        log.info("  diagnostic image: %s", p)
+    return rec
+
+
 def write_once_guard(path: Path) -> None:
     """terrain/00_base/vNNN is write-once: refuse to replace an existing file."""
     if Path(path).exists():

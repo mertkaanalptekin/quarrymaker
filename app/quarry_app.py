@@ -57,8 +57,10 @@ HINTS = [
     ("Blender path is not set", "Set the Blender location in step 2 (Settings)."),
     ("Blender executable not found", "The Blender location in step 2 is wrong. Pick one of the detected "
                                      "locations or check where Blender is installed."),
-    ("No consistent bench pattern", "The benches are not clear enough in the image. If you know the bench "
-                                    "height, enter it in step 2. You can also trace the pit outline on the map."),
+    ("consistent bench pattern", "No part of the pit showed clear benches. Look at the 'bench evidence' "
+                                 "image under step 7. If you know the bench height, enter it in step 2. "
+                                 "If the quarry was dug mostly after 2015, the height data is too old for "
+                                 "this step: untick 'Calculate the benches'; your other results are complete."),
     ("No quarry pit was found", "Trace the pit outline on the map (step 1, 'Trace pit outline') and save."),
     ("API key looks invalid", "Your OpenTopography key was refused. Check it and enter it again in step 2."),
     ("too large", "The area is too large. Draw a smaller rectangle around the quarry."),
@@ -151,6 +153,11 @@ def stage_status(cfg, paths, stage):
                     "check_images": []}
         return {"status": "todo", "summary": [], "check_images": []}
     rec = common.stage_up_to_date(paths, cfg, stage)
+    if not rec and rec_p.exists():
+        r = json.loads(rec_p.read_text(encoding="utf-8"))
+        if r.get("status") == "failed" and r.get("config_hash") == common.config_hash(cfg):
+            return {"status": "failed", "summary": r.get("summary", []),
+                    "check_images": [i for i in r.get("check_images", []) if (PROJECT / i).exists()]}
     if rec:
         return {"status": "ok", "summary": rec.get("summary", []),
                 "check_images": rec.get("check_images", []), "finished": rec.get("finished")}

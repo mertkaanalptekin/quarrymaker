@@ -59,28 +59,51 @@ def ground(dx, dy):
     return z
 
 
-def pit_radius(dx, dy):
+# Each pit: centre offset (m), floor radius, floor elevation (benches at
+# floor + k*H, i.e. fixed elevation levels), bench height/width, face angle,
+# shape, and whether it exists in the (older) DEM.
+PIT_A = dict(name="A", off=PIT_OFFSET, floor_r=FLOOR_R, floor_z=FLOOR_Z, H=BENCH_H, w=BENCH_W,
+             face=FACE_DEG, aniso=1.25, phase=0.6, in_dem=True)
+PITS_SIMPLE = [PIT_A]
+PITS_COMPLEX = [
+    PIT_A,
+    # a second pit on the hill with 10 m benches on other levels
+    dict(name="B", off=(700.0, -420.0), floor_r=90.0, floor_z=401.0, H=10.0, w=9.0, face=70.0,
+         aniso=1.1, phase=2.0, in_dem=True),
+    # a newer pit, dug after the DEM was captured: in the imagery only
+    dict(name="C", off=(-600.0, -520.0), floor_r=70.0, floor_z=371.0, H=12.0, w=10.0, face=70.0,
+         aniso=1.3, phase=4.0, in_dem=False),
+]
+PITS = PITS_SIMPLE
+
+
+def pit_radius(dx, dy, pit=PIT_A):
     """Irregular pit 'radius' coordinate: benches follow its iso-lines."""
-    px, py = dx - PIT_OFFSET[0], dy - PIT_OFFSET[1]
+    px, py = dx - pit["off"][0], dy - pit["off"][1]
     th = np.arctan2(py, px)
-    r = np.hypot(px * 1.0, py * 1.25)
-    return r / (1 + 0.13 * np.sin(3 * th + 0.6) + 0.06 * np.sin(5 * th - 1.1))
+    r = np.hypot(px * 1.0, py * pit["aniso"])
+    return r / (1 + 0.13 * np.sin(3 * th + pit["phase"]) + 0.06 * np.sin(5 * th - 1.1))
 
 
-def pit_surface(dx, dy):
-    face_w = BENCH_H / math.tan(math.radians(FACE_DEG))
-    period = BENCH_W + face_w
-    s = (pit_radius(dx, dy) - FLOOR_R) / period
+def pit_surface(dx, dy, pit=PIT_A):
+    face_w = pit["H"] / math.tan(math.radians(pit["face"]))
+    period = pit["w"] + face_w
+    s = (pit_radius(dx, dy, pit) - pit["floor_r"]) / period
     k = np.floor(s)
     f = s - k
-    rise = np.clip((f - BENCH_W / period) / (face_w / period), 0, 1)
-    z = FLOOR_Z + BENCH_H * (k + rise)
-    return np.where(s < 0, FLOOR_Z, z)
+    rise = np.clip((f - pit["w"] / period) / (face_w / period), 0, 1)
+    z = pit["floor_z"] + pit["H"] * (k + rise)
+    return np.where(s < 0, pit["floor_z"], z)
 
 
-def truth(dx, dy):
-    """True surface (m). dx, dy: local metres from the site centre."""
-    return np.minimum(ground(dx, dy), pit_surface(dx, dy))
+def truth(dx, dy, include_new=True):
+    """True surface (m). dx, dy: local metres from the site centre.
+    include_new=False gives the older surface the DEM was made from."""
+    z = ground(dx, dy)
+    for pit in PITS:
+        if include_new or pit["in_dem"]:
+            z = np.minimum(z, pit_surface(dx, dy, pit))
+    return z
 
 
 def truth_utm(x, y):
@@ -158,7 +181,12 @@ terraces:
 """
 
 
-def make(dest: Path, blender: str):
+def set_scenario(name):
+    global PITS
+    PITS = PITS_COMPLEX if name == "complex" else PITS_SIMPLE
+
+
+def make(dest: Path, blender: str, scenario: str = "simple"):
     import rasterio
     from PIL import Image
     from pyproj import Transformer
@@ -168,7 +196,9 @@ def make(dest: Path, blender: str):
 
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "data" / "reference").mkdir(parents=True, exist_ok=True)
-    dl, dt = 0.0085, 0.0065
+    set_scenario(scenario)
+    (dest / "scenario.json").write_text(json.dumps({"scenario": scenario}), encoding="utf-8")
+    dl, dt = (0.0085, 0.0065) if scenario == "simple" else (0.0135, 0.0105)
     (dest / "config.yaml").write_text(CONFIG.format(w=LON0 - dl, s=LAT0 - dt, e=LON0 + dl,
                                                     n=LAT0 + dt, blender=blender))
     cfg = common.load_config(dest / "config.yaml")
@@ -189,7 +219,7 @@ def make(dest: Path, blender: str):
             lat = N_ - (np.arange(rows) + b) * res
             LON, LAT = np.meshgrid(lon, lat)
             x, y = to_utm.transform(LON, LAT)
-            acc += truth(x - cx, y - cy)
+            acc += truth(x - cx, y - cy, include_new=False)  # the DEM predates newer pits
     dem = (acc / 36 + rng.normal(0, 0.8, acc.shape)).astype("float32")
     out = fetch.dem_cache_path(cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -211,7 +241,18 @@ def make(dest: Path, blender: str):
             p = cache / str(x) / f"{y}.img"
             p.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(colour(ux - cx, uy - cy, px, rng)).save(p, format="JPEG", quality=88)
-    print(f"truth: bench height {BENCH_H} m, width {BENCH_W} m, face {FACE_DEG} deg; "
+    if scenario == "complex":
+        # a big hand-traced outline around the whole complex, like a user would draw
+        to_ll = Transformer.from_crs("EPSG:32635", "EPSG:4326", always_xy=True)
+        ring = [(-1050, 520), (1150, 520), (1150, -950), (-1050, -950), (-1050, 520)]
+        ll = [list(to_ll.transform(cx + a, cy + b)) for a, b in ring]
+        gj = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {},
+              "geometry": {"type": "Polygon", "coordinates": [ll]}}]}
+        (dest / "data" / "reference" / "pit_outline.geojson").write_text(json.dumps(gj), encoding="utf-8")
+        cfgt = (dest / "config.yaml").read_text(encoding="utf-8")
+        cfgt = cfgt.replace("terraces:\n  enabled: true", "terraces:\n  enabled: true\n  pit_mask: data/reference/pit_outline.geojson")
+        (dest / "config.yaml").write_text(cfgt, encoding="utf-8")
+    print(f"scenario {scenario}; truth: bench height {BENCH_H} m, width {BENCH_W} m, face {FACE_DEG} deg; "
           f"DEM {rows}x{cols}; tiles {(x1 - x0 + 1) * (y1 - y0 + 1)}")
     print("config:", dest / "config.yaml")
 
@@ -219,6 +260,8 @@ def make(dest: Path, blender: str):
 def evaluate(dest: Path) -> dict:
     import rasterio
 
+    sc = dest / "scenario.json"
+    set_scenario(json.loads(sc.read_text(encoding="utf-8"))["scenario"] if sc.exists() else "simple")
     runs = sorted((dest / "terrain" / "10_terraces").glob("v*"))
     if not runs:
         raise SystemExit("no terrain/10_terraces run found")
@@ -266,6 +309,23 @@ def evaluate(dest: Path) -> dict:
         "pct_within_3m_terraced": float(100 * np.mean(np.abs(zt - ztrue)[zone] <= 3)),
         "pit_mask_iou": float((in_pit_true & (cls > 0)).sum() / max(1, (in_pit_true | (cls > 0)).sum())),
     }
+    # per pit: which pit forms the true surface where
+    g = ground(X - cx, Y - cy)
+    res["pits"] = {}
+    for pit in PITS:
+        ps = pit_surface(X - cx, Y - cy, pit)
+        own = ((g - ps) > 0.3) & (np.abs(ps - ztrue) < 1e-6)
+        if not own.any():
+            continue
+        built = own & np.isin(cls, (2, 3))
+        d = {"in_dem": pit["in_dem"], "true_H": pit["H"], "area_ha": round(own.sum() * abs(T.a) ** 2 / 1e4, 1),
+             "pct_benches_built": round(100 * built.sum() / own.sum(), 1)}
+        if built.sum() > 100:
+            d["pct_within_3m_measured"] = round(float(100 * np.mean(np.abs(zm - ztrue)[built] <= 3)), 1)
+            d["pct_within_3m_terraced"] = round(float(100 * np.mean(np.abs(zt - ztrue)[built] <= 3)), 1)
+            d["bench_corr_measured"] = round(float(np.corrcoef(hp(zm)[built], hp(ztrue)[built])[0, 1]), 3)
+            d["bench_corr_terraced"] = round(float(np.corrcoef(hp(zt)[built], hp(ztrue)[built])[0, 1]), 3)
+        res["pits"][pit["name"]] = d
     print(json.dumps(res, indent=2))
     # visual: hillshade of measured | interpreted | truth over the pit
     import common
@@ -291,10 +351,11 @@ if __name__ == "__main__":
     m = sp.add_parser("make")
     m.add_argument("dest")
     m.add_argument("--blender", required=True)
+    m.add_argument("--scenario", choices=["simple", "complex"], default="simple")
     ev = sp.add_parser("evaluate")
     ev.add_argument("dest")
     a = ap.parse_args()
     if a.cmd == "make":
-        make(Path(a.dest), a.blender)
+        make(Path(a.dest), a.blender, a.scenario)
     else:
         evaluate(Path(a.dest))

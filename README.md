@@ -85,19 +85,25 @@ floor elevations are listed in `terraces_params.json` and on the object.
 **How accurate.** On a synthetic quarry with known benches
 (`python tests/synthetic_quarry.py make|evaluate`):
 
-| | plain 30 m DEM | stage 07 |
+| bench area within 3 m of the truth | plain 30 m DEM | stage 07 |
 |---|---|---|
-| bench zone within 3 m of truth | 65% | 86% |
-| bench height | – | within ~2% (11.8 m vs 12 m) |
-| bench floor levels | – | within ~1 m with a known H (the DEM's own bias) |
-| pit outline overlap | – | 96% |
+| one pit (12 m benches) | 65% | 89% (height found: 11.84 m) |
+| complex: pit A (12 m) | 67% | 84% |
+| complex: pit B (10 m, other levels, small) | 65% | 75% |
+| complex: pit dug after the DEM | – | left as measured (correct) |
+| image without benches | – | stops and asks (no invented benches) |
 
-Accuracy is limited by three things:
+The method works region by region, so a mining complex with several pits and dumps (each with its
+own bench levels) is handled. It builds benches only where a region shows clear evidence.
+`07_bench_evidence.png` shows where.
+
+Accuracy is limited by these:
 - **DEM date.** The DEM predates the imagery: newly dug areas have no depth information. See
   `confidence.tif`.
 - **Plan detail.** Bench positions in plan follow the 30 m DEM contours. Very tight curves are
   simplified.
 - **Unmodelled features.** Face angle and haul ramps are not measured.
+- **Small pits.** Pits whose walls are only a few 30 m DEM cells wide are less reliable.
 
 If you know the bench height, set `terraces.bench_height_m`.
 
