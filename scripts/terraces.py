@@ -625,7 +625,8 @@ def zone_fields(tiles, zones, shape):
 # ----------------------------------------------------------------------
 
 
-def canny_lines(lum, res, sigma_m=1.0, low_q=0.70, high_q=0.90, min_len_m=18.0, within=None):
+def canny_lines(lum, res, sigma_m=1.0, low_q=0.70, high_q=0.90, min_len_m=18.0, within=None,
+                sun_azimuth_deg=None, return_dropped=False):
     """Bench lines from the photo: Canny edges (gradient, thin to 1 px along
     the gradient, hysteresis), kept only as long connected lines.
 
@@ -645,6 +646,16 @@ def canny_lines(lum, res, sigma_m=1.0, low_q=0.70, high_q=0.90, min_len_m=18.0, 
         fwd = np.roll(np.roll(mag, -dy, 0), -dx, 1)
         bwd = np.roll(np.roll(mag, dy, 0), dx, 1)
         nms |= sel & (mag >= fwd) & (mag >= bwd)
+    dropped = np.zeros_like(nms)
+    if sun_azimuth_deg is not None:
+        # A shadow lies on the side away from the sun. At the bench edge the photo
+        # turns bright -> dark moving away from the sun (brightness gradient points
+        # TOWARDS the sun); at the far end of the shadow it turns dark -> bright
+        # (gradient points away). Keep bench edges, drop shadow-end edges.
+        az = np.radians(float(sun_azimuth_deg))
+        toward = -np.cos(az) * gy / (mag + 1e-12) + np.sin(az) * gx / (mag + 1e-12)  # rows point south
+        dropped = nms & (toward < -0.3)
+        nms = nms & ~dropped
     ref = mag[within] if within is not None and within.any() else mag
     lo, hi = np.quantile(ref, low_q), np.quantile(ref, high_q)
     weak = nms & (mag > lo)
@@ -675,6 +686,8 @@ def canny_lines(lum, res, sigma_m=1.0, low_q=0.70, high_q=0.90, min_len_m=18.0, 
     length = cnt * res
     keep = has_strong & (length >= min_len_m) & (ext >= 0.45 * length) & (ext >= min_len_m * 0.8)
     keep[0] = False
+    if return_dropped:
+        return keep[labels], dropped & (mag > hi)
     return keep[labels]
 
 
@@ -788,7 +801,7 @@ def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, ope
 
 
 def bench_lines_from_file(ortho_path, dst_transform, dst_shape, crs, within, block_m=600.0,
-                          sigma_m=1.0, min_len_m=18.0, log=None):
+                          sigma_m=1.0, min_len_m=18.0, sun_azimuth_deg=135.0, log=None):
     """Bench lines traced at the photo's full resolution, block by block, and
     transferred to the analysis grid (a cell is a line cell when any photo
     pixel in it is). Only blocks touching `within` are processed."""
@@ -815,7 +828,8 @@ def bench_lines_from_file(ortho_path, dst_transform, dst_shape, crs, within, blo
             win = from_bounds(x0, y0, x1, y1, src.transform).round_offsets().round_lengths()
             rgb = src.read([1, 2, 3], window=win, boundless=True, fill_value=0).astype("float32")
             lum = rgb.mean(0) / 255.0
-            lines = canny_lines(lum, res_s, sigma_m=sigma_m, min_len_m=min_len_m, within=rgb.max(0) > 0)
+            lines = canny_lines(lum, res_s, sigma_m=sigma_m, min_len_m=min_len_m, within=rgb.max(0) > 0,
+                                sun_azimuth_deg=sun_azimuth_deg)
             sub_tf = rasterio.transform.from_origin(dst_transform.c + c0 * res_d,
                                                     dst_transform.f - r0 * res_d, res_d, res_d)
             tmp = np.zeros((r1 - r0, c1 - c0), "uint8")

@@ -427,6 +427,7 @@ const CAPTIONS = {
   "07_confidence": "How sure the program is: green = clear benches in the image, red = unsure.",
   "07_render_oblique": "Blender render of the quarry with benches.",
   "07_render_top": "Blender render from above, with benches.",
+  "08_plan_linework": "Plan linework: red bench lines, grey roads, white quarry outline, green farmland, cyan block yards.",
 };
 function caption(p) { const n = p.split("/").pop().replace(/\.[a-z]+$/i, ""); return CAPTIONS[n] || n.replace(/_/g, " "); }
 function stageTitle(id) { const st = S?.stages?.find(x => x.id === id); return st ? (+id === 0 ? "Check setup" : `Step ${+id}: ${st.title}`) : ""; }

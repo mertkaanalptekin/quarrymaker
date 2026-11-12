@@ -60,3 +60,10 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   line_min_length_m: 18     # bench lines shorter than this are ignored (rubble, blocks)
   bench_smoothing_m: 30     # how strongly the ground between bench lines is flattened
   max_cut_m: 12             # largest change allowed by the cut benches
+  sun_azimuth_deg: 135      # direction of the sun in the photo (135 = southeast); shadow ends are not benches
+plan:                   # stage 08 - plan linework for Rhino/CAD (DXF + GeoJSON)
+  enabled: true
+  bench_lines_3d: true      # bench lines at their elevation (use ProjectToCPlane in Rhino for a flat plan)
+  bench_simplify_m: 0.5     # simplification tolerance for bench lines
+  simplify_m: 2.0           # simplification tolerance for the other layers
+  road_min_length_m: 80

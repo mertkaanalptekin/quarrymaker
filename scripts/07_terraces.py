@@ -61,6 +61,7 @@ DEFAULTS = {
     "line_min_length_m": 18.0,      # bench lines shorter than this are ignored (rubble, blocks)
     "bench_smoothing_m": 30.0,      # how strongly the ground between lines is flattened
     "max_cut_m": 12.0,              # largest change allowed by the cut benches
+    "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
 }
 
 CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water",
@@ -370,7 +371,8 @@ def main(argv=None) -> int:
             within_tr &= T.bare_ground(rgb, res, mask)
         log.info("Tracing bench lines in the photo at full resolution ...")
         lines = T.bench_lines_from_file(ortho_tif, tf, (H, W), crs, within_tr,
-                                        min_len_m=float(tc["line_min_length_m"]), log=log)
+                                        min_len_m=float(tc["line_min_length_m"]),
+                                        sun_azimuth_deg=float(tc["sun_azimuth_deg"]), log=log)
         log.info("Cutting benches along %.1f km of bench lines ...", lines.sum() * res / 1000.0)
         dz_l, linfo = T.cut_benches(z0, lines, within_tr, res, ell_m=float(tc["bench_smoothing_m"]),
                                     dz_max=float(tc["max_cut_m"]), transform=tf)

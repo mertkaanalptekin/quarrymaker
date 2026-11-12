@@ -158,6 +158,20 @@ and usable. Look at the bench evidence image, then:
 - if most of the quarry was dug after 2015, the elevation data is simply too old to show its
   benches; untick "Calculate the benches".
 
+## Plan linework (step 8)
+
+Step 8 writes `quarry_plan.dxf` (open it in Rhino with units set to Meters) with these layers:
+- **QUARRY_OUTLINE:** the quarry area.
+- **BENCH_LINES:** the bench edges traced in the photo, as 3D lines at their elevation. Use
+  *ProjectToCPlane* in Rhino for a flat plan. Shadow edges are left out; the sun direction is set in
+  `config.yaml` (`sun_azimuth_deg`, 135 = southeast).
+- **ROADS:** road centrelines.
+- **AGRICULTURE:** farmland outlines.
+- **BLOCK_YARDS:** block stone depositing and staging areas.
+
+The coordinates match the Rhino OBJ (local metres; see README_plan.md for the origin). All
+layers are traced automatically and are interpretations, not a survey.
+
 ## If something goes wrong
 
 The app shows a red box with what stopped and **what to do**. The common ones:

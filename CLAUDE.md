@@ -248,10 +248,22 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - Negative control: imagery without benches (a grid pattern) → the stage stops and asks.
   - With a known H, bench floors are within the DEM's vertical bias (~1 m).
 
+- **Shadow ends:** a shadow falls on the side away from the sun (`sun_azimuth_deg`, 135 = southeast). At the bench edge, the photo turns bright to dark moving away from the sun; at the far end of the shadow it turns dark to bright. Edges whose brightness gradient points away from the sun are therefore dropped, leaving one line per bench.
+
+### 08 — Plan linework (`08_linework.py`, `linework.py`)
+DXF R12 (Rhino/CAD) plus GeoJSON in `exchange/rhino/vNNN/plan/`, in local metres like the OBJ.
+- **QUARRY_OUTLINE:** from step 07's quarry area.
+- **BENCH_LINES:** Canny lines at full resolution, shadow ends removed, 1-px thinned, then chained into polylines with m-connectivity (so diagonal and zigzag lines are not split), simplified to 0.5 m, 3D at the terraced surface.
+- **ROADS:** a white top-hat (bright, narrower than about 26 m, unsaturated), thinned to centrelines.
+- **AGRICULTURE:** flat, vegetated or saturated ground outside the quarry.
+- **BLOCK_YARDS:** the density of small bright blobs (top-hat > 0.08, density > 0.30) on gentle slopes inside the quarry.
+
+Coordinates are written to centimetres. On the real site the DXF is 4 MB, with 2,701 bench polylines (92.5 km), and an independent DXF reader opens it with no audit errors.
+
 ---
 
 ## Orchestrator (`run_pipeline.py`)
-- `python run_pipeline.py` runs stages 0 to 7 in order.
+- `python run_pipeline.py` runs stages 0 to 8 in order.
 - `--from 03` and `--only 05` run part of the pipeline. `--auto` skips the pauses between stages.
 - Each stage is idempotent: it skips work when its outputs exist and the config hash hasn't changed.
 - Log everything to `logs/run_vNNN.log`.
@@ -274,6 +286,18 @@ The user is an architect, not a programmer, so every feature must be reachable f
 - Opening `quarry_base.blend` shows the textured, true-scale terrain at the correct BlenderGIS georeference.
 - The Rhino OBJ opens Z-up, in meters, with the documented origin offset.
 - The Gaea package and its README are enough to set up a Gaea project at the correct scale without any guesswork.
+
+## Status and next steps (keep this updated)
+- **Done:** stages 00–08, the app and launchers, and the UTF-8 fix for Windows. Tested on the user's real site: a marble quarry district at W29.31 S37.84 E29.39 N37.89 (UTM 35N).
+- **Real-site findings:**
+  - The 30 m DEM (2011–2015) cannot confirm bench levels there.
+  - The bench lines traced in the photo plus the cut sheet give the terraced look the user approved.
+  - The user reports that the sun is in the southeast.
+- **Next, requested by the user:** compare the quarry area across imagery from several years, to measure expansion over time. Two possible sources:
+  - Esri World Imagery Wayback, which needs approval for its hosts;
+  - georeferenced GeoTIFFs supplied by the user.
+- **Possible:** bench heights from shadow widths (this needs the sun elevation); strict "carve below DEM" mode; an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
+- **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with cut benches: 51% against 67% for the plain DEM (documented limit).
 
 ## Out of scope for this task (later stages will use these outputs)
 - Haul-road and ramp reconstruction (benches and pit masks are now stage 07).
