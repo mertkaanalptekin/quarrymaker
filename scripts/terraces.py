@@ -621,97 +621,177 @@ def zone_fields(tiles, zones, shape):
 
 
 # ----------------------------------------------------------------------
-# Image-traced (illustrative) benches
+# Bench lines traced as lines (Canny edges) and benches carved per floor
 # ----------------------------------------------------------------------
-# When the DEM is too coarse or too old to confirm bench levels, the bench
-# edges can still be traced from the photo: parallel step lines have a clear
-# direction and spacing. A bank of oriented band-pass (Gabor) filters gives,
-# per pixel, the direction, the horizontal spacing p and the position inside
-# the step (phase). The DEM supplies the overall slope s, so one step rises
-# H = s * p. Steps are added on top of the measured surface (zero-mean), so
-# hills and low points stay where the DEM puts them.
 
 
-def oriented_periodic(lum, res, spacings_m=(6, 8, 10.5, 14, 18, 24), n_orient=8,
-                      bandwidth=0.2, tile_px=384, overlap=64):
-    """Per pixel: amplitude, phase, orientation (radians, wave-vector direction
-    in (row, col) coordinates), spacing (m) and peakiness of the strongest
-    oriented periodic pattern. The narrow band (bandwidth) needs about three
-    repeats to respond; peakiness = best amplitude / mean amplitude over the
-    spacings at that orientation (a single wall or road responds at all
-    spacings, a staircase at one)."""
-    H, W = lum.shape
-    out = {k: np.zeros((H, W), "float32") for k in ("amp", "phase", "theta", "spacing", "peak")}
-    step = tile_px - 2 * overlap
-    fy = np.fft.fftfreq(tile_px)[:, None]
-    fx = np.fft.fftfreq(tile_px)[None, :]
-    ramp = 0.5 * (1 - np.cos(np.linspace(0, np.pi, overlap)))
-    win1 = np.ones(tile_px)
-    win1[:overlap] = ramp
-    win1[-overlap:] = ramp[::-1]
-    taper = np.outer(win1, win1).astype("float32")
-    bank = []
-    for k in range(n_orient):
-        th = np.pi * k / n_orient
-        row = []
-        for p in spacings_m:
-            f0 = res / p
-            u0, v0 = f0 * np.sin(th), f0 * np.cos(th)
-            sf = bandwidth * f0
-            row.append((np.exp(-((fy - u0) ** 2 + (fx - v0) ** 2) / (2 * sf * sf)).astype("float32"), p))
-        bank.append((th, row))
-    lum = lum.astype("float32")
-    for r0 in range(-overlap, H, step):
-        for c0 in range(-overlap, W, step):
-            rs, cs = max(0, r0), max(0, c0)
-            re, ce = min(H, r0 + tile_px), min(W, c0 + tile_px)
-            sub = lum[rs:re, cs:ce]
-            if sub.size == 0 or float(sub.std()) < 1e-4:
-                continue
-            tile = np.zeros((tile_px, tile_px), "float32")
-            tile[rs - r0:rs - r0 + sub.shape[0], cs - c0:cs - c0 + sub.shape[1]] = sub - sub.mean()
-            F = np.fft.fft2(tile * taper)
-            best = np.zeros((tile_px, tile_px), "float32")
-            b_ph = np.zeros_like(best)
-            b_th = np.zeros_like(best)
-            b_p = np.zeros_like(best)
-            b_pk = np.zeros_like(best)
-            for th, row in bank:
-                amps, phs = [], []
-                for G, p in row:
-                    r = np.fft.ifft2(F * G)
-                    amps.append(np.abs(r).astype("float32"))
-                    phs.append(np.angle(r).astype("float32"))
-                A = np.stack(amps)
-                i_best = A.argmax(0)
-                a_best = np.take_along_axis(A, i_best[None], 0)[0]
-                m = a_best > best
-                if m.any():
-                    best[m] = a_best[m]
-                    b_ph[m] = np.take_along_axis(np.stack(phs), i_best[None], 0)[0][m]
-                    b_th[m] = th
-                    b_p[m] = np.array([p for _, p in row], "float32")[i_best][m]
-                    b_pk[m] = (a_best / (A.mean(0) + 1e-9))[m]
-            ir0, ic0 = max(rs, r0 + overlap), max(cs, c0 + overlap)
-            ir1, ic1 = min(re, r0 + tile_px - overlap), min(ce, c0 + tile_px - overlap)
-            if ir1 <= ir0 or ic1 <= ic0:
-                continue
-            st = (slice(ir0 - r0, ir1 - r0), slice(ic0 - c0, ic1 - c0))
-            sl = (slice(ir0, ir1), slice(ic0, ic1))
-            out["amp"][sl] = best[st]
-            out["phase"][sl] = b_ph[st]
-            out["theta"][sl] = b_th[st]
-            out["spacing"][sl] = b_p[st]
-            out["peak"][sl] = b_pk[st]
+def canny_lines(lum, res, sigma_m=1.0, low_q=0.70, high_q=0.90, min_len_m=18.0, within=None):
+    """Bench lines from the photo: Canny edges (gradient, thin to 1 px along
+    the gradient, hysteresis), kept only as long connected lines.
+
+    Bench faces and their shadows draw long, continuous light/dark edges;
+    rubble, blocks and texture give short broken ones. Returns a bool mask."""
+    from rasterio import features
+    from rasterio.transform import Affine
+
+    g = gauss(lum, sigma_m / res)
+    gy, gx = np.gradient(g)
+    mag = np.hypot(gx, gy)
+    ang = (np.rad2deg(np.arctan2(gy, gx)) + 180.0) % 180.0
+    nms = np.zeros_like(mag, dtype=bool)
+    # neighbour offsets for 4 quantised gradient directions (0, 45, 90, 135 deg)
+    for a0, (dy, dx) in ((0, (0, 1)), (45, (1, 1)), (90, (1, 0)), (135, (1, -1))):
+        sel = (np.abs(ang - a0) <= 22.5) | (np.abs(ang - a0) >= 157.5) if a0 == 0 else (np.abs(ang - a0) <= 22.5)
+        fwd = np.roll(np.roll(mag, -dy, 0), -dx, 1)
+        bwd = np.roll(np.roll(mag, dy, 0), dx, 1)
+        nms |= sel & (mag >= fwd) & (mag >= bwd)
+    ref = mag[within] if within is not None and within.any() else mag
+    lo, hi = np.quantile(ref, low_q), np.quantile(ref, high_q)
+    weak = nms & (mag > lo)
+    if within is not None:
+        weak &= within
+    strong = weak & (mag > hi)
+    out = np.zeros(mag.shape, bool)
+    if not weak.any():
+        return out
+    tf = Affine(res, 0, 0, 0, -res, 0)
+    labels = features.rasterize(
+        ((geom, i + 1) for i, (geom, v) in enumerate(features.shapes(weak.astype("uint8"), mask=weak,
+                                                                     connectivity=8, transform=tf))
+         if v == 1), out_shape=weak.shape, transform=tf, dtype="int32")
+    n = int(labels.max())
+    if n == 0:
+        return out
+    cnt = np.bincount(labels.ravel(), minlength=n + 1)
+    has_strong = np.bincount(labels.ravel(), weights=strong.ravel().astype(float), minlength=n + 1) > 0
+    # extent of each component (a compact blob of edges is not a line)
+    rows, cols = np.nonzero(labels)
+    lab = labels[rows, cols]
+    rmin = np.full(n + 1, 1e9); rmax = np.full(n + 1, -1e9)
+    cmin = np.full(n + 1, 1e9); cmax = np.full(n + 1, -1e9)
+    np.minimum.at(rmin, lab, rows); np.maximum.at(rmax, lab, rows)
+    np.minimum.at(cmin, lab, cols); np.maximum.at(cmax, lab, cols)
+    ext = np.hypot(rmax - rmin, cmax - cmin) * res
+    length = cnt * res
+    keep = has_strong & (length >= min_len_m) & (ext >= 0.45 * length) & (ext >= min_len_m * 0.8)
+    keep[0] = False
+    return keep[labels]
+
+
+def _shift(a, dy, dx, fill=0.0):
+    """Shift without wrap-around."""
+    out = np.full_like(a, fill)
+    H, W = a.shape
+    ys, yd = (slice(0, H - dy), slice(dy, H)) if dy >= 0 else (slice(-dy, H), slice(0, H + dy))
+    xs, xd = (slice(0, W - dx), slice(dx, W)) if dx >= 0 else (slice(-dx, W), slice(0, W + dx))
+    out[yd, xd] = a[ys, xs]
     return out
 
 
-def oriented_periodic_from_file(ortho_path, dst_transform, dst_shape, crs, within=None,
-                                block_m=480.0, log=None):
-    """Run oriented_periodic at the photo's full resolution, block by block,
-    and transfer the results to the (coarser) analysis grid. Only blocks
-    that touch `within` are processed. Phase is transferred as an
-    amplitude-weighted complex average, the rest by averaging/nearest."""
+def benched_surface(z0, lines, res, ell_m=30.0, cut=0.0, iters=600, tol=1e-4):
+    """Piecewise-flat sheet that follows the DEM at large scale but may break
+    only along bench lines.
+
+    Minimises  sum_cells (z - z0)^2 / ell^2  +  sum_neighbours w_pq (z_p - z_q)^2
+    with w_pq = 1 inside floors and `cut` across bench-line pixels: between two
+    lines the sheet becomes a flat bench, and at a line it steps by the drop
+    the DEM requires. Solved by Jacobi-preconditioned conjugate gradients
+    (numpy only). ell is in metres (pixels = ell / res)."""
+    lam = (res / ell_m) ** 2
+    open_ = (~lines).astype("float64")
+    # edge weights between (r, c) and its right / lower neighbour
+    wx = np.where((open_ * _shift(open_, 0, -1)) > 0, 1.0, cut)
+    wy = np.where((open_ * _shift(open_, -1, 0)) > 0, 1.0, cut)
+    wx[:, -1] = 0.0
+    wy[-1, :] = 0.0
+
+    def A(z):
+        dxp = wx * (z - _shift(z, 0, -1))           # to the right neighbour
+        dyp = wy * (z - _shift(z, -1, 0))           # to the lower neighbour
+        return lam * z + dxp - _shift(dxp, 0, 1) + dyp - _shift(dyp, 1, 0)
+
+    diag = lam + wx + _shift(wx, 0, 1) + wy + _shift(wy, 1, 0)
+    b = lam * z0
+    x = z0.astype("float64").copy()
+    r = b - A(x)
+    zv = r / diag
+    p = zv.copy()
+    rz = float((r * zv).sum())
+    bn = float(np.sqrt((b * b).sum())) + 1e-12
+    for _ in range(iters):
+        Ap = A(p)
+        alpha = rz / float((p * Ap).sum())
+        x += alpha * p
+        r -= alpha * Ap
+        if float(np.sqrt((r * r).sum())) / bn < tol:
+            break
+        zv = r / diag
+        rz_new = float((r * zv).sum())
+        p = zv + (rz_new / rz) * p
+        rz = rz_new
+    return x
+
+
+def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, open_m=12.0,
+                close_m=25.0, max_hole_ha=8.0, min_relief_m=5.0):
+    """The whole quarry area (pits, dumps, internal roads, yards), separated
+    from farmland, villages, greenhouses and factories.
+
+    1. bare-rock candidates: quarry index (bright, unsaturated, not green),
+       two-level Otsu, kept where the DEM has local relief;
+    2. opening (erode, dilate) cuts thin bright links such as roads, so fields
+       and buildings along a road do not join the quarry;
+    3. only large bodies with real relief survive (greenhouses and roofs are flat);
+    4. closing and hole filling make one continuous area (internal roads,
+       vegetation islands and yards belong to the quarry).
+    Returns (mask, polygons, info)."""
+    from rasterio import features
+    from shapely.geometry import Polygon
+
+    zs = gauss(z0, 10 / res)
+    slope = overall_slope_deg(zs, res)
+    cand, _, info = detect_pit(rgb, slope, z0, transform, res, min_area_m2=0.0, min_relief_m=0.0,
+                               min_mean_slope_deg=0.0, keep_polygon=None)
+    ro = max(1, int(round(open_m / res)))
+    opened = box_blur(box_blur(cand.astype(float), ro) > 0.999, ro) > 0.001
+    labels, polys = label_components(opened, transform)
+    m1 = gauss(z0, 75 / res)
+    relief = np.sqrt(np.clip(gauss(z0 * z0, 75 / res) - m1 * m1, 0, None))
+    keep = []
+    for i, p in enumerate(polys):
+        if p.area < min_area_ha * 1e4:
+            continue
+        sel = labels == i + 1
+        if float(np.percentile(relief[sel], 75)) < min_relief_m:
+            continue
+        if keep_polygon is not None and not p.intersects(keep_polygon):
+            continue
+        keep.append(p)
+    mask = np.zeros(cand.shape, bool)
+    if keep:
+        mask = features.rasterize(((p, 1) for p in keep), out_shape=cand.shape, transform=transform,
+                                  dtype="uint8").astype(bool)
+    rc = max(1, int(round(close_m / res)))
+    mask = box_blur(box_blur(mask.astype(float), rc) > 0.001, rc) > 0.999
+    # fill holes smaller than max_hole_ha
+    labels, polys = label_components(mask, transform)
+    filled = []
+    for p in polys:
+        holes = [h for h in p.interiors if Polygon(h).area > max_hole_ha * 1e4]
+        filled.append(Polygon(p.exterior, holes))
+    if filled:
+        mask = features.rasterize(((p, 1) for p in filled), out_shape=cand.shape, transform=transform,
+                                  dtype="uint8").astype(bool)
+    return mask, filled, {"area_m2": float(mask.sum() * res * res), "bodies": len(filled),
+                          "source": "quarry area: bare rock + relief, roads cut, large bodies only"}
+
+
+
+def bench_lines_from_file(ortho_path, dst_transform, dst_shape, crs, within, block_m=600.0,
+                          sigma_m=1.0, min_len_m=18.0, log=None):
+    """Bench lines traced at the photo's full resolution, block by block, and
+    transferred to the analysis grid (a cell is a line cell when any photo
+    pixel in it is). Only blocks touching `within` are processed."""
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.warp import reproject
@@ -720,113 +800,94 @@ def oriented_periodic_from_file(ortho_path, dst_transform, dst_shape, crs, withi
     Hd, Wd = dst_shape
     res_d = dst_transform.a
     bpx = max(64, int(round(block_m / res_d)))
-    keys = ("rel", "coh", "cos", "sin", "theta", "spacing", "peak")
-    dst = {k: np.zeros(dst_shape, "float32") for k in keys}
-    margin_m = 60.0
+    out = np.zeros(dst_shape, bool)
+    margin = 40.0
     with rasterio.open(ortho_path) as src:
         res_s = src.res[0]
         blocks = [(r0, c0) for r0 in range(0, Hd, bpx) for c0 in range(0, Wd, bpx)
-                  if within is None or within[r0:r0 + bpx, c0:c0 + bpx].any()]
+                  if within[r0:r0 + bpx, c0:c0 + bpx].any()]
         for n, (r0, c0) in enumerate(blocks):
             r1, c1 = min(Hd, r0 + bpx), min(Wd, c0 + bpx)
-            x0 = dst_transform.c + c0 * res_d - margin_m
-            y1 = dst_transform.f - r0 * res_d + margin_m
-            x1 = dst_transform.c + c1 * res_d + margin_m
-            y0 = dst_transform.f - r1 * res_d - margin_m
+            x0 = dst_transform.c + c0 * res_d - margin
+            x1 = dst_transform.c + c1 * res_d + margin
+            y1 = dst_transform.f - r0 * res_d + margin
+            y0 = dst_transform.f - r1 * res_d - margin
             win = from_bounds(x0, y0, x1, y1, src.transform).round_offsets().round_lengths()
             rgb = src.read([1, 2, 3], window=win, boundless=True, fill_value=0).astype("float32")
             lum = rgb.mean(0) / 255.0
-            stf = src.window_transform(win)
-            r = oriented_periodic(lum, res_s)
-            # strength relative to local contrast, and direction consistency,
-            # both measured at the photo's own resolution
-            contrast = gauss(np.abs(lum - gauss(lum, 8 / res_s)), 20 / res_s) + 1e-3
-            r["rel"] = (r["amp"] / contrast).astype("float32")
-            e2 = r["rel"] * np.exp(2j * r["theta"])
-            r["coh"] = (np.abs(gauss_complex(e2, 15 / res_s)) / (gauss(r["rel"], 15 / res_s) + 1e-9)).astype("float32")
-            r["cos"] = r["rel"] * np.cos(r["phase"])
-            r["sin"] = r["rel"] * np.sin(r["phase"])
-            # doubled-angle trick keeps orientation averaging valid; nearest is fine here
-            sub_tf = rasterio.transform.from_origin(dst_transform.c + c0 * res_d, dst_transform.f - r0 * res_d,
-                                                    res_d, res_d)
-            for k in keys:
-                tmp = np.zeros((r1 - r0, c1 - c0), "float32")
-                rs = Resampling.nearest if k in ("theta", "spacing") else Resampling.average
-                reproject(r[k], tmp, src_transform=stf, src_crs=crs, dst_transform=sub_tf, dst_crs=crs,
-                          resampling=rs)
-                dst[k][r0:r1, c0:c1] = tmp
-            if log and (n + 1) % 10 == 0:
-                log.info("  traced benches: %d/%d blocks", n + 1, len(blocks))
-    return {"rel": dst["rel"], "coh": dst["coh"], "phase": np.arctan2(dst["sin"], dst["cos"]).astype("float32"),
-            "theta": dst["theta"], "spacing": dst["spacing"], "peak": dst["peak"]}
+            lines = canny_lines(lum, res_s, sigma_m=sigma_m, min_len_m=min_len_m, within=rgb.max(0) > 0)
+            sub_tf = rasterio.transform.from_origin(dst_transform.c + c0 * res_d,
+                                                    dst_transform.f - r0 * res_d, res_d, res_d)
+            tmp = np.zeros((r1 - r0, c1 - c0), "uint8")
+            reproject(lines.astype("uint8"), tmp, src_transform=src.window_transform(win), src_crs=crs,
+                      dst_transform=sub_tf, dst_crs=crs, resampling=Resampling.max)
+            out[r0:r1, c0:c1] = tmp > 0
+            if log and (n + 1) % 20 == 0:
+                log.info("  bench lines: %d/%d blocks", n + 1, len(blocks))
+    return out & within
 
 
-TRACE_SENSITIVITY = {
-    # line strength vs local contrast, direction consistency, steps deep across the lines
-    "low": {"rel_min": 0.42, "coh_min": 0.82, "depth_min": 3.0},
-    "medium": {"rel_min": 0.36, "coh_min": 0.78, "depth_min": 2.5},
-    "high": {"rel_min": 0.30, "coh_min": 0.72, "depth_min": 2.0},
-}
+def cut_benches(z0, lines, within, res, ell_m=30.0, island_max_m2=400.0, dz_max=12.0,
+                merge_m=4.0, transform=None):
+    """Benches cut into the measured surface along the bench lines.
 
+    dz = sheet(z0, lines) - sheet(z0, no lines): the change that the lines
+    alone cause (see benched_surface). Hills and low points stay as measured;
+    between lines the ground becomes flat benches and each line becomes a face
+    whose height is the elevation drop the DEM requires there.
+    Small fully enclosed islands (piles, bushes) are neutralised and the change
+    is limited to +-dz_max. Returns (dz, info)."""
+    from rasterio import features
+    from rasterio.transform import Affine
 
-def traced_benches(periodic, z0, res, within, transform, face_angle_deg=75.0, sensitivity="medium",
-                   slope_min_deg=2.0, min_area_m2=2000.0, h_min=0.3, h_max=25.0):
-    """Illustrative benches traced from the photo (see the section comment).
-
-    periodic: result of oriented_periodic_from_file (photo at full resolution,
-    transferred to the analysis grid). An area counts as a staircase when its
-    lines are strong, consistently oriented, and span at least `depth_min`
-    steps across their own direction (a road or a single wall does not).
-    The step height is slope x spacing from the DEM, so hills and low points
-    stay where the DEM puts them.
-
-    Returns a dict: dev (height to add, m), weight (0..1), face (bool),
-    stepped (bool), H (step height per pixel), spacing, areas (list)."""
-    import math as _m
-    prm = TRACE_SENSITIVITY.get(str(sensitivity).lower(), TRACE_SENSITIVITY["medium"])
-    rel, coh, ph, th, sp = (periodic[k] for k in ("rel", "coh", "phase", "theta", "spacing"))
-    zs = gauss(z0, 12 / res)
-    gr, gc = np.gradient(zs, res)
-    # the image's row axis points south, the DEM gradient is in (row, col) too
-    s_k = gr * np.sin(th) + gc * np.cos(th)          # rise per metre along the wave vector
-    slope = overall_slope_deg(zs, res)
-    cand = within & (rel > prm["rel_min"]) & (coh > prm["coh_min"]) & (slope > slope_min_deg)
-    rc = max(1, int(round(8 / res)))
-    cand = box_blur(box_blur(cand.astype(float), rc) > 0.15, rc) > 0.85
-    cand &= within
-    H = np.zeros(z0.shape, "float32")
-    keep = np.zeros(z0.shape, bool)
-    areas = []
-    if cand.any():
-        labels, polys = label_components(cand, transform)
-        rows, cols = np.indices(cand.shape, dtype="float32")
-        for i, poly in enumerate(polys):
-            if poly.area < min_area_m2:
-                continue
-            sel = labels == i + 1
-            t = 0.5 * np.angle(np.mean(np.exp(2j * th[sel])))
-            across = (rows[sel] * np.sin(t) + cols[sel] * np.cos(t)) * res
-            p_med = float(np.median(sp[sel]))
-            depth = float(np.percentile(across, 95) - np.percentile(across, 5)) / max(p_med, 1e-6)
-            if depth < prm["depth_min"]:
-                continue
-            s_med = float(np.median(np.abs(s_k[sel])))
-            h = float(np.clip(s_med * p_med, h_min, h_max))   # one step rises slope x spacing
-            H[sel] = h
-            keep |= sel
-            c = poly.centroid
-            areas.append({"area_m2": round(poly.area), "spacing_m": round(p_med, 1),
-                          "steps_deep": round(depth, 1), "slope_pct": round(100 * s_med, 1),
-                          "bench_height_m": round(h, 2), "centre": [round(c.x), round(c.y)]})
-    # position inside the step: u grows uphill; the face is put where the photo
-    # is darkest (usually the shadowed face)
-    sign = np.where(s_k >= 0, 1.0, -1.0)
-    u = sign * (ph - np.pi) / (2 * np.pi)
-    Hs = np.maximum(H, 1e-3).astype("float64")
-    phi = np.clip(np.tan(np.radians(slope)) / _m.tan(_m.radians(face_angle_deg)), 0.05, 0.9)
-    zst, face, _ = staircase(u * Hs, 0.0, Hs, phi)
-    dev = np.where(keep, zst - u * Hs, 0.0)
-    weight = np.clip(gauss(keep.astype(float), 4 / res) * 1.6, 0, 1) * keep
-    return {"dev": dev.astype("float32"), "weight": weight.astype("float32"), "face": face & keep,
-            "stepped": keep, "H": H, "spacing": np.where(keep, sp, 0).astype("float32"),
-            "areas": sorted(areas, key=lambda a: -a["area_m2"])}
+    rows = np.where(within.any(1))[0]
+    cols = np.where(within.any(0))[0]
+    if rows.size == 0:
+        return np.zeros(z0.shape, "float32"), {}
+    pad = int(round(3 * ell_m / res))
+    r0, r1 = max(0, rows[0] - pad), min(z0.shape[0], rows[-1] + 1 + pad)
+    c0, c1 = max(0, cols[0] - pad), min(z0.shape[1], cols[-1] + 1 + pad)
+    sl = (slice(r0, r1), slice(c0, c1))
+    zc, lc, wc = z0[sl].astype("float64"), lines[sl], within[sl]
+    # a face often shows as two close edges (crest and toe, or the two sides of its
+    # shadow): widen the lines so such a pair becomes one face, not a thin floor
+    if merge_m > 0:
+        lc = box_blur(lc.astype(float), max(1, int(round(merge_m / 2 / res)))) > 0.01
+    dz = benched_surface(zc, lc, res, ell_m) - benched_surface(zc, np.zeros_like(lc), res, ell_m)
+    # neutralise small enclosed islands (closed little outlines become pillars or holes)
+    tf = transform or Affine(res, 0, 0, 0, -res, 0)
+    free = wc & ~lc
+    shapes = [(g, i + 1) for i, (g, v) in enumerate(features.shapes(free.astype("uint8"), mask=free,
+                                                                       connectivity=4, transform=tf)) if v == 1]
+    n_isl = 0
+    if shapes:
+        labels = features.rasterize(shapes, out_shape=free.shape, transform=tf, dtype="int32")
+        cnt = np.bincount(labels.ravel())
+        small = cnt * res * res < island_max_m2
+        small[0] = False
+        isl = small[labels]
+        n_isl = int(small.sum())
+        if isl.any():
+            ok = ~isl & ~lc
+            num = gauss(np.where(ok, dz, 0.0), 6 / res)
+            den = gauss(ok.astype(float), 6 / res) + 1e-9
+            dz = np.where(isl | (lc & (gauss(isl.astype(float), 1.5) > 0.2)), num / den, dz)
+    dz = np.clip(dz, -dz_max, dz_max)
+    out = np.zeros(z0.shape, "float32")
+    out[sl] = dz
+    # step heights at the lines: the change across each line pixel
+    zt = (zc + dz)
+    jumps = []
+    for dy, dx in ((0, 2), (2, 0)):
+        a = _shift(zt, dy, dx, np.nan)
+        b = _shift(zt, -dy, -dx, np.nan)
+        j = np.abs(a - b)[lc & wc]
+        jumps.append(j[np.isfinite(j)])
+    j = np.concatenate(jumps) if jumps else np.array([])
+    j = j[j > 0.3]
+    info = {"islands_neutralised": n_isl,
+            "line_length_km": round(float(lc[wc].sum()) * res / 1000.0, 1),
+            "step_height_median_m": round(float(np.median(j)), 2) if j.size else None,
+            "step_height_p75_m": round(float(np.percentile(j, 75)), 2) if j.size else None,
+            "step_height_p90_m": round(float(np.percentile(j, 90)), 2) if j.size else None}
+    return out, info

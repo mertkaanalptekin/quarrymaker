@@ -94,8 +94,14 @@ floor elevations are listed in `terraces_params.json` and on the object.
 | image without benches | – | stops and asks (no invented benches) |
 
 The method works region by region, so a mining complex with several pits and dumps (each with its
-own bench levels) is handled. It builds benches only where a region shows clear evidence.
-`07_bench_evidence.png` shows where.
+own bench levels) is handled. It builds confirmed benches only where a region shows clear evidence
+(`07_bench_evidence.png`).
+
+Where the elevation data is too old or coarse to confirm benches, as at a marble quarry district,
+step 7 traces the **bench lines in the photo** (`07_bench_lines.png`) and **cuts benches along
+them**. The ground between lines becomes flat benches, and each step is as tall as the elevation
+data's drop there, so hills and low points stay. These benches are **illustrative**: their position
+in plan follows the photo, and their heights are limited by the old elevation data.
 
 Accuracy is limited by these:
 - **DEM date.** The DEM predates the imagery: newly dug areas have no depth information. See

@@ -193,7 +193,13 @@ Known limitations to state in the report: at 30 m resolution, quarry benches (ab
 
 ### 07 — Interpret terraces (`07_terraces.py`)
 Calculates the quarry's benches from the satellite image with the help of the DEM. All output is **interpreted** and kept apart from the base.
-- **Pit mask:** bright, unsaturated, non-vegetated imagery (two-level Otsu on a quarry index), kept only where the DEM shows local relief. The user can supply `terraces.pit_mask` (GeoJSON) instead.
+- **Quarry area** (`quarry_area`), which separates the quarry from farmland, villages, greenhouses and factories:
+  1. bare-rock candidates from a quarry index, using a two-level Otsu threshold, kept only where the DEM shows relief;
+  2. an opening that cuts thin bright links such as roads;
+  3. only bodies of at least `quarry_min_area_ha` with real relief are kept;
+  4. closing and hole filling turn the result into one continuous area.
+
+  The user can supply `terraces.pit_mask` (GeoJSON) instead.
 - **Edges:** image edges that run along the DEM contours (bench crests and toes).
 - **Bare ground only:** benches are looked for on bare rock or soil. The test uses colour saturation, which is lighting-independent, split inside the outline only when vegetation is clearly present.
 - **Bench height:** benches are mined at fixed elevations, so edge strength projected onto elevation repeats every H. H maximises that coherence above the baseline of the elevation distribution. Edges on planar wall parts weigh more, because a 30 m DEM squeezes elevations at the rim and floor. A known H can be set.
@@ -208,7 +214,19 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - A zone is re-tested as a whole and must pass a plausibility check: implied bench floor at most `max_bench_width_m`, and H not at the edge of the search range.
 - **Ask, don't guess:** if no zone survives, the stage stops. It still writes `07_bench_evidence.png` and the other diagnostic images, and records the stage as failed, so the app shows the images.
 - **Levels and surface:** in each zone, bench floors sit at fixed elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them. Benches are built only where a zone has evidence (class 5 = pit without clear benches, which keeps the measured surface).
-- **Geometry:** a staircase with the configured face angle, where faces take a fraction `tan(slope)/tan(face angle)` of each period. Flat pit floors keep the measured shape. Water is flattened.
+- **Benches cut along the photo's bench lines** (`method: auto`, where no zone is confirmed; illustrative):
+  - **Lines:** bench lines are traced at the photo's full resolution with Canny edges (gradient, 1-px thinning, hysteresis). Only long, extended lines (≥ `line_min_length_m`) on bare ground are kept, so rubble and blocks give no lines.
+  - **Cut:** a sheet follows the DEM at large scale (`bench_smoothing_m`) and may break only along the lines (a screened Poisson problem with cuts, solved by conjugate gradients). The applied change is `dz = sheet(lines) − sheet(no lines)`:
+    - the ground between lines becomes flat benches;
+    - each line becomes a face whose height is the DEM's own drop there;
+    - hills and low points stay as measured.
+  - **Clean-up:** close edge pairs merge into one face, small enclosed islands are neutralised, and the change is capped at `max_cut_m`.
+  - **Labelling:** `bench_method` = 2 marks these cells, and they are drawn in `07_bench_lines.png`.
+  - **Known limits:**
+    - steps are only as tall as the old DEM allows;
+    - road and yard edges can make small steps;
+    - in a small synthetic pit (pit B) the cut benches were less accurate than the plain DEM (51% vs 67% within 3 m), even though they look terraced.
+- **Geometry (confirmed zones):** a staircase with the configured face angle, where faces take a fraction `tan(slope)/tan(face angle)` of each period. Flat pit floors keep the measured shape. Water is flattened.
 - **Outputs:**
   - `terraces_dem.tif`, `classes.tif`, `confidence.tif`, `dz.tif` and `surface_correction.tif`;
   - `pit_outline.geojson` and `terraces_params.json` (bench height, floor elevations, statistics);

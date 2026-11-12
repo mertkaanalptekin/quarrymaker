@@ -125,6 +125,22 @@ Press **Open in Blender** or **Open folder**.
 
 ## About step 7 (benches)
 
+Step 7 first finds the **quarry area** in the photo. This is bare rock and dumps with relief, kept
+separate from fields, greenhouses and villages. If it includes something that isn't quarry (for
+example a factory), trace the quarry outline yourself in step 1.
+
+It then traces the **bench lines** in the photo: the long light and dark edges that bench faces and
+their shadows draw. Each line becomes a step cut into the terrain, and the ground between lines
+becomes a flat bench. The **height of each step comes from the elevation data** (how much the ground
+drops there), so hills and low points stay as measured. The image `07_bench_lines.png` shows the
+traced lines in red. These benches are an **illustration**: their positions follow the photo, but
+where the quarry was dug deeper after the elevation data was captured (2011–2015), the steps come
+out shallower than in reality.
+
+Where the elevation data itself confirms benches, those parts are built from it instead (green in
+`07_benches_measured_and_traced.png`); the parts cut along photo lines are orange.
+
+
 Step 7 looks at your pit **region by region**, in squares of about 400 m. A big mining complex has
 several pits and waste dumps, each with its own bench levels, and some parts may have been dug
 after the elevation data was captured (2011–2015).

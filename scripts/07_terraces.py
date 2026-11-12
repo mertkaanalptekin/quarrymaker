@@ -57,7 +57,10 @@ DEFAULTS = {
     "bare_ground_only": True,       # look for benches only on bare rock/soil, not vegetation
     "max_bench_width_m": 60.0,      # wider implied bench floors are not quarry benches
     "method": "auto",               # auto | measured | traced  (see the report)
-    "trace_sensitivity": "medium",  # low | medium | high  (benches traced from the photo)
+    "quarry_min_area_ha": 5.0,      # automatic quarry area: smallest body kept
+    "line_min_length_m": 18.0,      # bench lines shorter than this are ignored (rubble, blocks)
+    "bench_smoothing_m": 30.0,      # how strongly the ground between lines is flattened
+    "max_cut_m": 12.0,              # largest change allowed by the cut benches
 }
 
 CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water",
@@ -181,11 +184,9 @@ def main(argv=None) -> int:
         mask, polys = load_user_mask(tc["pit_mask"], cfg, tf, (H, W))
         mask_info = {"source": f"user polygon {tc['pit_mask']}", "area_m2": float(mask.sum() * res * res)}
     else:
-        mask, polys, mask_info = T.detect_pit(
-            rgb, slope, z0, tf, res, threshold=tc["pit_threshold"],
-            min_area_m2=float(tc["pit_min_area_m2"]),
-            min_local_relief_m=float(tc["pit_min_local_relief_m"]), keep_polygon=aoi_poly)
-        mask_info["source"] = "imagery quarry index + DEM relief (automatic)"
+        mask, polys, mask_info = T.quarry_area(rgb, z0, res, tf, keep_polygon=aoi_poly,
+                                               min_area_ha=float(tc["quarry_min_area_ha"]))
+        mask_info["source"] = "quarry area from the photo + DEM relief (automatic)"
     if mask.sum() == 0:
         raise common.PipelineError(
             "No quarry pit was found in the imagery. Draw the pit outline as a GeoJSON polygon "
@@ -361,37 +362,37 @@ def main(argv=None) -> int:
     wb = feather * T.smoothstep(slope, min_slope, min_slope + 4.0) * evidence
     zt = z0 + wb * (z_st - z0)
 
-    # ---------------- 4b. benches traced from the photo (illustrative) --------
+    # ---------------- 4b. benches cut along the photo's bench lines -------------
     trc = None
     if method in ("auto", "traced"):
         within_tr = mask & (evidence <= 0.5)
-        log.info("Tracing benches from the photo at full resolution (a few minutes) ...")
-        per = T.oriented_periodic_from_file(ortho_tif, tf, (H, W), crs, within=within_tr, log=log)
-        trc = T.traced_benches(per, z0, res, within_tr, tf, face_angle_deg=float(tc["face_angle_deg"]),
-                               sensitivity=tc.get("trace_sensitivity", "medium"))
-        del per
-        trc["weight"] = trc["weight"] * feather   # blend back to measured at the pit edge
-        zt = zt + trc["weight"] * trc["dev"]
-        ta = trc["areas"]
-        if ta:
-            aw = np.array([a["area_m2"] for a in ta], float)
-            hv = np.array([a["bench_height_m"] for a in ta], float)
-            spv = np.array([a["spacing_m"] for a in ta], float)
-            log.info("Traced %d stepped areas (%.1f ha): step spacing %.1f m, step height %.1f m "
-                     "(area-weighted; height = elevation-data slope x spacing)", len(ta), aw.sum() / 1e4,
-                     float((spv * aw).sum() / aw.sum()), float((hv * aw).sum() / aw.sum()))
-            if Hb is None:
-                Hb = float(np.median(hv))
-        else:
-            log.info("No stepped areas traced in the photo.")
-    traced_any = bool(trc and trc["areas"])
+        if tc.get("bare_ground_only", True):
+            within_tr &= T.bare_ground(rgb, res, mask)
+        log.info("Tracing bench lines in the photo at full resolution ...")
+        lines = T.bench_lines_from_file(ortho_tif, tf, (H, W), crs, within_tr,
+                                        min_len_m=float(tc["line_min_length_m"]), log=log)
+        log.info("Cutting benches along %.1f km of bench lines ...", lines.sum() * res / 1000.0)
+        dz_l, linfo = T.cut_benches(z0, lines, within_tr, res, ell_m=float(tc["bench_smoothing_m"]),
+                                    dz_max=float(tc["max_cut_m"]), transform=tf)
+        weight_l = feather * (mask & (evidence <= 0.5))
+        zt = zt + weight_l * dz_l
+        affected = (np.abs(dz_l) > 0.25) & (weight_l > 0.5)
+        gz = np.hypot(*np.gradient(zt, res))
+        trc = {"lines": lines, "info": linfo, "affected": affected,
+               "face": affected & lines & (gz > 0.5), "weight": weight_l * affected}
+        log.info("Benches cut along the photo's bench lines: %.1f ha changed; step height at the lines "
+                 "median %s m (75%%: %s m, 90%%: %s m), from the elevation data", affected.sum() * res * res / 1e4,
+                 linfo.get("step_height_median_m"), linfo.get("step_height_p75_m"), linfo.get("step_height_p90_m"))
+        if Hb is None and linfo.get("step_height_median_m"):
+            Hb = float(linfo["step_height_median_m"])
+    traced_any = bool(trc is not None and trc["affected"].any())
     if not zones and not traced_any:
         diag = diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h)
-        msg = "Neither the elevation data nor the photo shows a bench pattern in this pit."
+        msg = "Neither the elevation data nor the photo's bench lines give benches in this quarry area."
         common.fail_stage(paths, cfg, "07", [msg], [ev_img] + diag, log)
         raise common.PipelineError(
-            msg + " Check the pit outline, try terraces.trace_sensitivity: high, or set "
-            "terraces.enabled: false; your other results are complete.")
+            msg + " Check the quarry outline, or set terraces.enabled: false; your other results "
+            "are complete.")
     if Hb is None:
         Hb = 1.0
 
@@ -415,7 +416,7 @@ def main(argv=None) -> int:
     method_map = np.zeros((H, W), "uint8")   # 1 = confirmed by elevation data, 2 = traced (illustrative)
     method_map[mask & (wb > 0.5)] = 1
     if traced_any:
-        tr = mask & (trc["weight"] > 0.5)
+        tr = mask & trc["affected"]
         classes[tr & ~trc["face"]] = 2
         classes[tr & trc["face"]] = 3
         method_map[tr] = 2
@@ -500,11 +501,12 @@ def main(argv=None) -> int:
         "surface_correction_m": {"mean": float(-(delta * wb)[zone].mean()) if zone.any() else 0.0,
                                  "abs_mean": float(np.abs(delta * wb)[zone].mean()) if zone.any() else 0.0},
         "method": method,
-        "traced": {"areas": trc["areas"][:200] if trc else [], "count": len(trc["areas"]) if trc else 0,
-                   "area_ha": round(sum(a["area_m2"] for a in trc["areas"]) / 1e4, 1) if trc else 0.0,
-                   "sensitivity": str(tc.get("trace_sensitivity", "medium")),
-                   "note": ("Illustrative: step edges traced from the photo; step height = elevation-data "
-                            "slope x step spacing, so hills and low points stay as measured.")},
+        "traced": {**(trc["info"] if trc else {}),
+                   "area_ha": round(float(trc["affected"].sum()) * res * res / 1e4, 1) if trc else 0.0,
+                   "note": ("Illustrative: bench lines traced in the photo (light/dark edges of faces and "
+                            "their shadows); the ground between lines becomes flat benches and each line "
+                            "a face whose height is the elevation data's drop there. Hills and low points "
+                            "stay as measured.")},
         "coherence_R": est["R"] if est else None, "coherence_baseline": est["R_baseline"] if est else None,
         "signal_score": est["score"] if est else None,
         "coherence_significance": float(max([t["sig"] for t in tiles], default=0.0)),
@@ -535,7 +537,8 @@ def main(argv=None) -> int:
     files.append(params_p)
 
     # ---------------- check images ------------------------------------------
-    imgs = [ev_img, traced_image(paths, rgb, mask, method_map)] + check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, confidence, est, Hb,
+    imgs = [ev_img, traced_image(paths, rgb, mask, method_map)] + (
+        [lines_image(paths, rgb, mask, trc["lines"])] if trc is not None else []) + check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, confidence, est, Hb,
                                    res, (r0, r1, c0, c1), log)
 
     # ---------------- Blender ------------------------------------------------
@@ -638,6 +641,25 @@ def main_spectrum(zl, w, zone, tiles, main, hmin, hmax):
     return T.estimate_bench_height(zl[sel], w[sel], np.ones(int(sel.sum())), hmin, hmax)
 
 
+def lines_image(paths, rgb, mask, lines):
+    """Photo with the traced bench lines (red) and the quarry outline (white)."""
+    import numpy as np
+    from PIL import Image
+    rows = np.where(mask.any(1))[0]
+    cols = np.where(mask.any(0))[0]
+    crop = (slice(rows[0], rows[-1] + 1), slice(cols[0], cols[-1] + 1))
+    a = rgb[crop].copy()
+    a[lines[crop]] = (255, 30, 30)
+    m = mask[crop]
+    edge = m & ~(np.roll(m, 1, 0) & np.roll(m, -1, 0) & np.roll(m, 1, 1) & np.roll(m, -1, 1))
+    a[edge] = (255, 255, 255)
+    img = Image.fromarray(a)
+    img.thumbnail((2400, 2400))
+    p = paths.checks / "07_bench_lines.png"
+    img.save(p)
+    return p
+
+
 def traced_image(paths, rgb, mask, method_map):
     """Photo with the benches: green = confirmed by the elevation data,
     orange = traced from the photo (illustrative)."""
@@ -655,7 +677,7 @@ def traced_image(paths, rgb, mask, method_map):
     d = ImageDraw.Draw(img)
     d.rectangle([8, 8, 520, 44], fill=(255, 255, 255))
     d.text((14, 12), "green = benches confirmed by elevation data", fill=(0, 0, 0))
-    d.text((14, 26), "orange = benches traced from the photo (illustrative)", fill=(0, 0, 0))
+    d.text((14, 26), "orange = benches cut along the photo's bench lines (illustrative)", fill=(0, 0, 0))
     p = paths.checks / "07_benches_measured_and_traced.png"
     img.save(p)
     return p
@@ -867,16 +889,12 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         f"- Grid {p['grid']['cols']} x {p['grid']['rows']} at {p['grid']['resolution_m']:.3f} m; "
         f"mesh {br['patch_verts']} vertices (stride {p['patch']['stride']})",
         "",
-        *(["### Benches traced from the photo (illustrative)",
-           f"{p['traced']['count']} stepped areas, {p['traced']['area_ha']:.1f} ha (sensitivity "
-           f"{p['traced']['sensitivity']}). {p['traced']['note']}",
-           "",
-           "| area | step spacing | step height | steps deep | slope (elevation data) | centre (CRS) |",
-           "|---|---|---|---|---|---|",
-           *[f"| {a['area_m2'] / 1e4:.2f} ha | {a['spacing_m']:.1f} m | {a['bench_height_m']:.1f} m | "
-             f"{a['steps_deep']:.1f} | {a['slope_pct']:.0f}% | {a['centre'][0]}, {a['centre'][1]} |"
-             for a in p['traced']['areas'][:40]],
-           ""] if p.get("traced", {}).get("count") else []),
+        *(["### Benches cut along the photo's bench lines (illustrative)",
+           f"{p['traced'].get('line_length_km', 0)} km of bench lines; {p['traced']['area_ha']:.1f} ha changed. "
+           f"Step height at the lines (from the elevation data): median {p['traced'].get('step_height_median_m')} m, "
+           f"75% {p['traced'].get('step_height_p75_m')} m, 90% {p['traced'].get('step_height_p90_m')} m. "
+           f"{p['traced']['note']}",
+           ""] if p.get("traced", {}).get("area_ha") else []),
         "## Checks",
         "| | check | detail |",
         "|---|---|---|",
@@ -917,10 +935,10 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "relative to the smooth surface.",
         "",
         "## Limitations",
-        "- Benches traced from the photo (orange in `07_benches_measured_and_traced.png`, "
-        "`bench_method` = 2) are illustrative: their plan position follows the photo, but their "
-        "height is the elevation data's slope times the step spacing. Where the pit was dug "
-        "deeper after the elevation data was captured, these steps come out too shallow.",
+        "- Benches cut along the photo's bench lines (orange in `07_benches_measured_and_traced.png`, "
+        "`bench_method` = 2) are illustrative: their plan position follows the photo, their height "
+        "is the elevation data's drop. Where the quarry was dug deeper after the elevation data "
+        "was captured, the steps come out too shallow. Roads and yard edges can make small steps.",
         "- Small pits, whose walls are only a few 30 m DEM cells wide, are less reliable (the DEM "
         "squeezes their elevations; the bench height can come out a few percent low).",
         "- Horizontal bench positions follow the smoothed 30 m DEM contours, shifted by the image-derived "
