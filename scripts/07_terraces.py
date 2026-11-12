@@ -62,6 +62,9 @@ DEFAULTS = {
     "bench_smoothing_m": 30.0,      # how strongly the ground between lines is flattened
     "max_cut_m": 12.0,              # largest change allowed by the cut benches
     "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
+    "bench_style": "carved",        # carved = fixed-height walls, flat floors | dem_steps = steps as tall as the DEM drop
+    "carve_bench_height_m": 8.0,    # wall height for carved benches when bench_height_m is auto
+    "wall_angle_deg": 80.0,         # carved walls (marble quarries: near vertical)
 }
 
 CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water",
@@ -121,6 +124,7 @@ def main(argv=None) -> int:
     import shapely
     from shapely.geometry import box, mapping
 
+    import linework as lw
     import terraces as T
 
     args, cfg, paths, log = common.stage_context(__doc__, "07", argv)
@@ -383,19 +387,46 @@ def main(argv=None) -> int:
                                         min_len_m=float(tc["line_min_length_m"]),
                                         sun_azimuth_deg=float(tc["sun_azimuth_deg"]), log=log)
         log.info("Cutting benches along %.1f km of bench lines ...", lines.sum() * res / 1000.0)
-        dz_l, linfo = T.cut_benches(z0, lines, within_tr, res, ell_m=float(tc["bench_smoothing_m"]),
-                                    dz_max=float(tc["max_cut_m"]), transform=tf)
+        style = str(tc.get("bench_style", "carved")).lower()
+        if style == "carved":
+            # roads and block yards draw long bright edges too; they are not bench walls
+            lum_ = rgb.astype("float64").mean(-1) / 255.0
+            x_ = rgb.astype("float64") / 255.0
+            sat_ = x_.max(-1) - x_.min(-1)
+            slope_ = np.degrees(np.arctan(np.hypot(*np.gradient(T.gauss(z0, 5.0 / res), res))))
+            excl = lw.road_mask(lum_, sat_, slope_, res) | lw.yard_mask(lum_, mask, slope_, res)
+            n_before = int(lines.sum())
+            lines = lines & ~excl
+            log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
+            Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
+            dz_l, linfo = T.carve_levels(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
+                                         face_angle_deg=float(tc["wall_angle_deg"]))
+            linfo["bench_height_source"] = "your value" if fixed_h is not None else "default guess (carve_bench_height_m)"
+            if linfo:
+                log.info("Carved benches: %s m walls, %.1f%% of the bench lines on a wall, mean cut %s m",
+                         linfo.get("bench_height_m"), linfo.get("lines_on_walls_pct", 0), linfo.get("mean_cut_m"))
+            else:
+                log.info("No area left for carved benches (all of it is confirmed by the elevation data)")
+        else:
+            dz_l, linfo = T.cut_benches(z0, lines, within_tr, res, ell_m=float(tc["bench_smoothing_m"]),
+                                        dz_max=float(tc["max_cut_m"]), transform=tf)
+        linfo["style"] = style
         weight_l = feather * (mask & (evidence <= 0.5))
         zt = zt + weight_l * dz_l
         affected = (np.abs(dz_l) > 0.25) & (weight_l > 0.5)
         gz = np.hypot(*np.gradient(zt, res))
-        trc = {"lines": lines, "info": linfo, "affected": affected,
+        trc = {"lines": lines, "info": linfo, "affected": affected, "dz": weight_l * dz_l,
                "face": affected & lines & (gz > 0.5), "weight": weight_l * affected}
-        log.info("Benches cut along the photo's bench lines: %.1f ha changed; step height at the lines "
-                 "median %s m (75%%: %s m, 90%%: %s m), from the elevation data", affected.sum() * res * res / 1e4,
-                 linfo.get("step_height_median_m"), linfo.get("step_height_p75_m"), linfo.get("step_height_p90_m"))
-        if Hb is None and linfo.get("step_height_median_m"):
-            Hb = float(linfo["step_height_median_m"])
+        if style == "carved":
+            log.info("Benches carved along the photo's bench lines: %.1f ha changed", affected.sum() * res * res / 1e4)
+            if Hb is None:
+                Hb = float(linfo.get("bench_height_m") or 1.0)
+        else:
+            log.info("Benches cut along the photo's bench lines: %.1f ha changed; step height at the lines "
+                     "median %s m (75%%: %s m, 90%%: %s m), from the elevation data", affected.sum() * res * res / 1e4,
+                     linfo.get("step_height_median_m"), linfo.get("step_height_p75_m"), linfo.get("step_height_p90_m"))
+            if Hb is None and linfo.get("step_height_median_m"):
+                Hb = float(linfo["step_height_median_m"])
     traced_any = bool(trc is not None and trc["affected"].any())
     if not zones and not traced_any:
         diag = diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h)
@@ -453,6 +484,18 @@ def main(argv=None) -> int:
                     "terraces.mesh_max_vertices).", nverts, stride)
 
     # ---------------- write rasters --------------------------------------------
+    # interpreted outputs are rebuilt whenever this stage runs (only the measured
+    # base is write-once); clear the previous ones so nothing stale is kept
+    for old in list(od.glob("*.tif")) + list(od.glob("*.npz")) + [od / "pit_outline.geojson",
+                                                                   od / "quarry_terraced.blend"]:
+        if old.is_file():
+            old.unlink()
+    rhino_old = paths.rhino / "terraced"
+    if rhino_old.is_dir():
+        for old in rhino_old.glob("quarry_terraced*"):
+            if old.is_file():
+                old.unlink()
+
     def wr(name, arr, dtype, nodata=None):
         p = od / name
         if p.exists():
@@ -514,10 +557,15 @@ def main(argv=None) -> int:
         "method": method,
         "traced": {**(trc["info"] if trc else {}),
                    "area_ha": round(float(trc["affected"].sum()) * res * res / 1e4, 1) if trc else 0.0,
-                   "note": ("Illustrative: bench lines traced in the photo (light/dark edges of faces and "
-                            "their shadows); the ground between lines becomes flat benches and each line "
-                            "a face whose height is the elevation data's drop there. Hills and low points "
-                            "stay as measured.")},
+                   "note": (("Illustrative: benches carved into the measured ground at fixed levels "
+                             "(one wall every bench height, flat floors between), with the walls moved onto "
+                             "the bench lines traced in the photo. The bench height is "
+                             + str((trc["info"] if trc else {}).get("bench_height_source", "")) + ".")
+                            if trc and trc["info"].get("style") == "carved" else
+                            ("Illustrative: bench lines traced in the photo (light/dark edges of faces and "
+                             "their shadows); the ground between lines becomes flat benches and each line "
+                             "a face whose height is the elevation data's drop there. Hills and low points "
+                             "stay as measured."))},
         "coherence_R": est["R"] if est else None, "coherence_baseline": est["R_baseline"] if est else None,
         "signal_score": est["score"] if est else None,
         "coherence_significance": float(max([t["sig"] for t in tiles], default=0.0)),
@@ -589,8 +637,15 @@ def main(argv=None) -> int:
     d_out = float(np.abs(dz[out_zone]).max()) if out_zone.any() else 0.0
     checks.append(("Outside the pit, interpreted = measured", d_out == 0.0, f"max |dz| outside {d_out}"))
     mdz = params["dz_in_bench_zone"]["mean"]
-    checks.append(("No systematic shift vs measured (mean dz within 25% of H)", abs(mdz) <= 0.25 * Hb,
-                   f"mean dz {mdz:+.2f} m, std {params['dz_in_bench_zone']['std']:.2f} m, H {Hb:.2f} m"))
+    if trc is not None and trc["info"].get("style") == "carved":
+        dzc = trc["dz"][trc["affected"]] if trc["affected"].any() else np.zeros(1)
+        Hc_ = float(trc["info"].get("bench_height_m") or Hb)
+        ok_c = float(dzc.max()) <= 0.01 and float(dzc.mean()) >= -Hc_
+        checks.append(("Carved benches lie under the measured ground (cut only, mean cut at most H)", ok_c,
+                       f"carved change: max {float(dzc.max()):+.2f} m, mean {float(dzc.mean()):+.2f} m, wall height {Hc_:.2f} m"))
+    else:
+        checks.append(("No systematic shift vs measured (mean dz within 25% of H)", abs(mdz) <= 0.25 * Hb,
+                       f"mean dz {mdz:+.2f} m, std {params['dz_in_bench_zone']['std']:.2f} m, H {Hb:.2f} m"))
     g = br["georef"]
     ok_geo = (g.get("SRID") == meta["crs"] and abs(g.get("crs x", 1e18) - ox) < 1e-6
               and abs(g.get("crs y", 1e18) - oy) < 1e-6)
@@ -900,12 +955,19 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         f"- Grid {p['grid']['cols']} x {p['grid']['rows']} at {p['grid']['resolution_m']:.3f} m; "
         f"mesh {br['patch_verts']} vertices (stride {p['patch']['stride']})",
         "",
+        *(["### Benches carved along the photo's bench lines (illustrative)",
+           f"{p['traced'].get('line_length_km', 0)} km of bench lines; {p['traced']['area_ha']:.1f} ha changed. "
+           f"Wall height {p['traced'].get('bench_height_m')} m ({p['traced'].get('bench_height_source')}), "
+           f"walls at {p['traced'].get('face_angle_deg')} deg; {p['traced'].get('lines_on_walls_pct')}% of the "
+           f"bench-line length lies on a wall; mean cut {p['traced'].get('mean_cut_m')} m, "
+           f"deepest {p['traced'].get('max_cut_m')} m. {p['traced']['note']}",
+           ""] if p.get("traced", {}).get("area_ha") and p["traced"].get("style") == "carved" else []),
         *(["### Benches cut along the photo's bench lines (illustrative)",
            f"{p['traced'].get('line_length_km', 0)} km of bench lines; {p['traced']['area_ha']:.1f} ha changed. "
            f"Step height at the lines (from the elevation data): median {p['traced'].get('step_height_median_m')} m, "
            f"75% {p['traced'].get('step_height_p75_m')} m, 90% {p['traced'].get('step_height_p90_m')} m. "
            f"{p['traced']['note']}",
-           ""] if p.get("traced", {}).get("area_ha") else []),
+           ""] if p.get("traced", {}).get("area_ha") and p["traced"].get("style") != "carved" else []),
         "## Checks",
         "| | check | detail |",
         "|---|---|---|",
@@ -946,10 +1008,12 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "relative to the smooth surface.",
         "",
         "## Limitations",
-        "- Benches cut along the photo's bench lines (orange in `07_benches_measured_and_traced.png`, "
-        "`bench_method` = 2) are illustrative: their plan position follows the photo, their height "
-        "is the elevation data's drop. Where the quarry was dug deeper after the elevation data "
-        "was captured, the steps come out too shallow. Roads and yard edges can make small steps.",
+        "- Benches made along the photo's bench lines (orange in `07_benches_measured_and_traced.png`, "
+        "`bench_method` = 2) are illustrative. Carved style (default): every wall has the same height "
+        "(your bench height, or a default guess of 8 m), floors are flat and the walls follow the photo's "
+        "lines where there are lines and the DEM contours elsewhere; the overall depth still follows the "
+        "old DEM, so parts dug deeper since are not deep enough. dem_steps style: steps are only as tall "
+        "as the DEM's drop. Roads and yard edges can make small steps.",
         "- Small pits, whose walls are only a few 30 m DEM cells wide, are less reliable (the DEM "
         "squeezes their elevations; the bench height can come out a few percent low).",
         "- Horizontal bench positions follow the smoothed 30 m DEM contours, shifted by the image-derived "

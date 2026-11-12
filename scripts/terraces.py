@@ -906,3 +906,137 @@ def cut_benches(z0, lines, within, res, ell_m=30.0, island_max_m2=400.0, dz_max=
             "step_height_p75_m": round(float(np.percentile(j, 75)), 2) if j.size else None,
             "step_height_p90_m": round(float(np.percentile(j, 90)), 2) if j.size else None}
     return out, info
+
+
+def _cg(apply_A, b, x0, diag, iters=800, tol=1e-5):
+    x = x0.astype("float64").copy()
+    r = b - apply_A(x)
+    zv = r / diag
+    p = zv.copy()
+    rz = float((r * zv).sum())
+    bn = float(np.sqrt((b * b).sum())) + 1e-12
+    for _ in range(iters):
+        Ap = apply_A(p)
+        alpha = rz / float((p * Ap).sum())
+        x += alpha * p
+        r -= alpha * Ap
+        if float(np.sqrt((r * r).sum())) / bn < tol:
+            break
+        zv = r / diag
+        rz_new = float((r * zv).sum())
+        p = zv + (rz_new / rz) * p
+        rz = rz_new
+    return x
+
+
+def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_deg=6.0):
+    """Bench height guessed from the photo and the DEM together: on a benched
+    slope consecutive bench lines lie one bench apart, so the spacing between
+    neighbouring lines measured downhill, times the tangent of the large-scale
+    slope, is one bench height. Returns (H or None, number of samples)."""
+    gr, gc = np.gradient(z_s, res)
+    g = np.hypot(gr, gc)
+    ok = lines & within & (np.degrees(np.arctan(g)) > min_slope_deg)
+    rr, cc = np.nonzero(ok)
+    if rr.size < 50:
+        return None, int(rr.size)
+    if rr.size > 20000:
+        sel = np.random.default_rng(0).choice(rr.size, 20000, replace=False)
+        rr, cc = rr[sel], cc[sel]
+    ur, uc = -gr[rr, cc] / g[rr, cc], -gc[rr, cc] / g[rr, cc]       # downhill
+    Hh, Ww = lines.shape
+    gaps = np.full(rr.size, np.nan)
+    alive = np.ones(rr.size, bool)
+    start = max(2, int(np.ceil(4.0 / res)))                          # leave the own line
+    for k in range(start, int(max_gap_m / res) + 1):
+        r = np.round(rr + ur * k).astype(int)
+        c = np.round(cc + uc * k).astype(int)
+        inb = (r >= 0) & (r < Hh) & (c >= 0) & (c < Ww)
+        hit = np.zeros(rr.size, bool)
+        hit[inb] = lines[r[inb], c[inb]]
+        new = alive & hit
+        gaps[new] = k * res
+        alive &= ~hit & inb
+    h = gaps * g[rr, cc]
+    h = h[np.isfinite(h)]
+    if h.size < 50:
+        return None, int(h.size)
+    return float(np.median(h)), int(h.size)
+
+
+def carve_levels(z0, lines, within, res, bench_h, face_angle_deg=80.0, smooth_m=12.0, snap_m=12.0,
+                 feather_m=20.0, island_m=8.0, level=None):
+    """Benches carved into the terrain at fixed levels (marble quarries: flat
+    floors, tall near-vertical walls), with the walls snapped to the bench
+    lines traced in the photo.
+
+    1. A smooth surface z_s (DEM filtered at smooth_m) is split into levels
+       level + n*H; floors are flat, faces rise at face_angle_deg between them
+       (they cover tan(slope)/tan(face) of each step), cut H/2 below so the
+       quarry is carved out of the measured ground, never built up.
+    2. Snapping: at every bench-line pixel z_s is shifted (at most H/2) onto
+       the nearest wall position; the shifts are spread smoothly over snap_m
+       (screened Poisson), so the walls run along the photo's lines.
+    The change is faded out over feather_m at the quarry outline.
+    Returns (dz, info)."""
+    H = float(bench_h)
+    rows = np.where(within.any(1))[0]
+    cols = np.where(within.any(0))[0]
+    if rows.size == 0:
+        return np.zeros(z0.shape, "float32"), {}
+    pad = int(round(max(smooth_m, snap_m, feather_m) * 3 / res))
+    r0, r1 = max(0, rows[0] - pad), min(z0.shape[0], rows[-1] + 1 + pad)
+    c0, c1 = max(0, cols[0] - pad), min(z0.shape[1], cols[-1] + 1 + pad)
+    sl = (slice(r0, r1), slice(c0, c1))
+    zc, wc = z0[sl].astype("float64"), within[sl]
+    lc = lines[sl] & wc
+    z_s = gauss(zc, smooth_m / 2 / res)
+    if level is None:      # phase that puts the most line pixels on wall positions
+        ph = np.exp(2j * np.pi * z_s[lc] / H)
+        level = float(np.angle(ph.mean()) / (2 * np.pi) * H) if lc.any() else 0.0
+    u = (z_s - level) / H
+    t = np.where(lc, (np.round(u) - u) * H, 0.0)
+    # screened Poisson spread of the snap shifts: (W + lam + L) c = W t
+    wdat = np.where(lc, 20.0, 0.0)
+    lam = (res / snap_m) ** 2
+
+    def A(x):
+        dxp = x - _shift(x, 0, -1)
+        dyp = x - _shift(x, -1, 0)
+        dxp[:, -1] = 0.0
+        dyp[-1, :] = 0.0
+        return (wdat + lam) * x + dxp - _shift(dxp, 0, 1) + dyp - _shift(dyp, 1, 0)
+
+    diag = wdat + lam + 4.0
+    corr = _cg(A, wdat * t, np.zeros_like(zc), diag, iters=500, tol=1e-4) if lc.any() else np.zeros_like(zc)
+    corr = np.clip(corr, -H / 2, H / 2)
+    zsn = z_s + corr
+    gr, gc = np.gradient(z_s, res)
+    slope = np.degrees(np.arctan(np.hypot(gr, gc)))
+    phi = np.clip(np.tan(np.radians(slope)) / np.tan(np.radians(face_angle_deg)), 0.02, 0.9)
+    u = (zsn - level) / H
+    n = np.floor(u + 0.5)
+    r = u - n
+    half = phi / 2
+    g = np.where(r < -half, n - 0.5, np.where(r >= half, n + 0.5, n - 0.5 + (r + half) / phi))
+    face = np.abs(r) < half
+    # small islands of another level (snapping fragments) join their surroundings
+    for _ in range(2):
+        gs = gauss(g, island_m / 2 / res)
+        fix = ~face & (np.abs(g - gs) > 0.5)
+        g = np.where(fix, np.round(gs - 0.5) + 0.5, g)
+    z_st = level + H * g - H / 2.0                          # carve: floors below the ground
+    feather = gauss(wc.astype(float), feather_m / 2 / res) * wc
+    feather = np.clip((feather - 0.5) * 2.0, 0, 1)
+    dz = feather * (z_st - zc)
+    dz = np.minimum(dz, 0.0)                                # never above the measured ground
+    out = np.zeros(z0.shape, "float32")
+    out[sl] = dz
+    walls = face & wc & (feather > 0.5)
+    info = {"bench_height_m": round(H, 2), "level_m": round(level, 2), "face_angle_deg": face_angle_deg,
+            "line_length_km": round(float(lc.sum()) * res / 1000.0, 1),
+            "snap_shift_median_m": round(float(np.median(np.abs(t[lc]))), 2) if lc.any() else None,
+            "lines_on_walls_pct": round(100.0 * float((face & lc).sum()) / max(1, int(lc.sum())), 1),
+            "mean_cut_m": round(float(-dz[wc].mean()), 2), "max_cut_m": round(float(-dz.min()), 1),
+            "wall_area_ha": round(float(walls.sum()) * res * res / 1e4, 1)}
+    return out, info

@@ -46,8 +46,8 @@ STAGE_INFO = {
                                         "files for Rhino."),
     "05": ("Make the Gaea package", "Makes the square heightmap and a guide for setting the right scale in Gaea."),
     "06": ("Check the results", "Measures the results (scale, position, heights) and renders preview images."),
-    "07": ("Calculate the benches", "Calculates the quarry benches (terraces) from the satellite image "
-                                    "and the height data."),
+    "07": ("Calculate the benches", "Carves the quarry benches (flat floors, tall walls) into the "
+                                    "terrain, following the bench lines in the satellite photo."),
     "09": ("Compare the years", "Finds the quarry area on every different archived satellite photo "
                                 "(Esri Wayback, 2014 onwards) and shows how the quarry grew."),
     "08": ("Draw the plan linework", "Draws bench lines, quarry outline, roads, farmland and block yards "

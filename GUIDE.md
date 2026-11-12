@@ -75,7 +75,7 @@ for your location (metres).
 - **OpenTopography key.** Paste your key and press **Use this key**. For safety the key is only kept
   while the app is open; it is never saved. You paste it again next time.
 - **Bench height.** Quarry walls are cut as giant steps; the bench height is how tall one step is
-  (usually 10–15 m).
+  (usually 6–15 m). Step 7 carves every wall at this height; without a value it uses an 8 m guess.
   - **If you don't know it,** leave "calculate it from the image" selected.
   - **If you can find it,** the bench levels become more accurate. Ask the quarry operator, look in
     the permit documents, or measure it in Google Earth Pro: hover over one bench floor and then
@@ -99,7 +99,7 @@ The steps:
 | 4 | Builds the Blender terrain | The terrain looks right |
 | 5 | Makes the Gaea package | The red box covers the area |
 | 6 | Measures and checks everything | All checks pass |
-| 7 | Calculates the benches | The bench evidence map: green where benches were found. The benches look plausible. |
+| 7 | Carves the benches | The bench lines follow the photo's benches; the renders show flat floors and tall walls. |
 
 Downloads are kept, so running again is quick.
 
@@ -130,12 +130,22 @@ separate from fields, greenhouses and villages. If it includes something that is
 example a factory), trace the quarry outline yourself in step 1.
 
 It then traces the **bench lines** in the photo: the long light and dark edges that bench faces and
-their shadows draw. Each line becomes a step cut into the terrain, and the ground between lines
-becomes a flat bench. The **height of each step comes from the elevation data** (how much the ground
-drops there), so hills and low points stay as measured. The image `07_bench_lines.png` shows the
-traced lines in red. These benches are an **illustration**: their positions follow the photo, but
-where the quarry was dug deeper after the elevation data was captured (2011–2015), the steps come
-out shallower than in reality.
+their shadows draw. Lines along roads and in block yards are left out. The benches are then **carved
+into the terrain** the way marble quarries are cut: flat floors at fixed levels, one bench height
+apart, with tall, near-vertical walls between them. The walls are moved onto the photo's bench lines;
+where the photo shows no lines they follow the terrain's contours. Material is only removed, never
+added. The image `07_bench_lines.png` shows the traced lines in red.
+
+- **Wall height:** your bench height from step 2. If you leave it on "calculate", an **8 m guess** is
+  used (the photo can't measure heights). Setting the real value makes the model much closer to the
+  real quarry.
+- **Wall steepness:** 80° by default (`wall_angle_deg` in `config.yaml`).
+- **Older look:** to make steps only as tall as the elevation data's drop (the previous, softer
+  look), set `bench_style: dem_steps` in `config.yaml`.
+
+These benches are an **illustration**: their positions follow the photo and their height is the one
+you set, but the overall depth of the quarry still comes from the elevation data (2011–2015). Parts
+dug deeper since then are not deep enough in the model.
 
 Where the elevation data itself confirms benches, those parts are built from it instead (green in
 `07_benches_measured_and_traced.png`); the parts cut along photo lines are orange.

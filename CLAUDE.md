@@ -214,18 +214,17 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - A zone is re-tested as a whole and must pass a plausibility check: implied bench floor at most `max_bench_width_m`, and H not at the edge of the search range.
 - **Ask, don't guess:** if no zone survives, the stage stops. It still writes `07_bench_evidence.png` and the other diagnostic images, and records the stage as failed, so the app shows the images.
 - **Levels and surface:** in each zone, bench floors sit at fixed elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them. Benches are built only where a zone has evidence (class 5 = pit without clear benches, which keeps the measured surface).
-- **Benches cut along the photo's bench lines** (`method: auto`, where no zone is confirmed; illustrative):
-  - **Lines:** bench lines are traced at the photo's full resolution with Canny edges (gradient, 1-px thinning, hysteresis). Only long, extended lines (≥ `line_min_length_m`) on bare ground are kept, so rubble and blocks give no lines.
-  - **Cut:** a sheet follows the DEM at large scale (`bench_smoothing_m`) and may break only along the lines (a screened Poisson problem with cuts, solved by conjugate gradients). The applied change is `dz = sheet(lines) − sheet(no lines)`:
-    - the ground between lines becomes flat benches;
-    - each line becomes a face whose height is the DEM's own drop there;
-    - hills and low points stay as measured.
-  - **Clean-up:** close edge pairs merge into one face, small enclosed islands are neutralised, and the change is capped at `max_cut_m`.
+- **Benches carved along the photo's bench lines** (`method: auto`, where no zone is confirmed; illustrative; `bench_style: carved`, the default):
+  - **Lines:** bench lines are traced at the photo's full resolution with Canny edges (gradient, 1-px thinning, hysteresis). Only long, extended lines (≥ `line_min_length_m`) on bare ground are kept, so rubble and blocks give no lines. Lines on roads (white top-hat) and block yards (blob density) are dropped.
+  - **Carve (`carve_levels`):** floors at fixed levels `G + n·H`, walls at `wall_angle_deg` (80°) between them, the whole staircase lowered H/2 and clipped to the measured ground (cut only). H is `bench_height_m`, or `carve_bench_height_m` (8 m guess) when auto. G puts the most line pixels on walls.
+  - **Snapping:** at each line pixel the smoothed DEM is shifted (≤ H/2) onto the nearest wall position, spread by a screened Poisson solve (CG); ~88% of line length then lies on a wall. Small level islands are merged.
   - **Labelling:** `bench_method` = 2 marks these cells, and they are drawn in `07_bench_lines.png`.
   - **Known limits:**
-    - steps are only as tall as the old DEM allows;
-    - road and yard edges can make small steps;
-    - in a small synthetic pit (pit B) the cut benches were less accurate than the plain DEM (51% vs 67% within 3 m), even though they look terraced.
+    - the overall depth follows the old DEM; parts dug deeper since are too shallow;
+    - with the default H the walls are a guess; the user's known H should be set;
+    - complex pit B (true H 10 m, default 8 m): 49% within 3 m vs 67% for the plain DEM.
+  - `bench_style: dem_steps` keeps the previous cut sheet (`cut_benches`): a screened Poisson sheet that breaks along the lines, steps as tall as the DEM drop.
+- **Outputs are rebuilt on every run** of stage 07 (stale interpreted files are removed first); only `terrain/00_base` is write-once.
 - **Geometry (confirmed zones):** a staircase with the configured face angle, where faces take a fraction `tan(slope)/tan(face angle)` of each period. Flat pit floors keep the measured shape. Water is flattened.
 - **Outputs:**
   - `terraces_dem.tif`, `classes.tif`, `confidence.tif`, `dz.tif` and `surface_correction.tif`;
@@ -236,16 +235,16 @@ Calculates the quarry's benches from the satellite image with the help of the DE
 - **Checks:**
   - the base is untouched (hashes);
   - interpreted = measured outside the pit;
-  - no systematic shift (mean dz within H/4);
+  - no systematic shift (mean dz within H/4); for carved benches instead: cut only (dz ≤ 0) and mean cut at most H;
   - the .blend georef equals `meta.json`;
   - the mesh Z range and position match the raster.
 - **Test:** `tests/synthetic_quarry.py make|evaluate` builds quarries with known benches and measures the recovery. Results (share of the bench area within 3 m of the truth, plain DEM → stage 07):
   - `--scenario simple`, one pit: 65% → 89%, with H 11.84 m for a true 12 m.
-  - `--scenario complex`:
+  - `--scenario complex` (carved style, default H 8 m):
     - pit A (12 m benches): 67% → 84%;
-    - pit B (10 m benches on other levels, small, with walls only about three DEM cells wide): 65% → 75%;
-    - pit C (dug after the DEM): correctly left as measured.
-  - Negative control: imagery without benches (a grid pattern) → the stage stops and asks.
+    - pit B (10 m benches on other levels, small, with walls only about three DEM cells wide): 67% → 49%;
+    - pit C (dug after the DEM): carved from the old ground, 4% → 15% (still too shallow).
+  - Negative control: imagery without benches (a grid pattern) → no measured zone is confirmed; in `method: auto` walls are still carved along the grid lines (illustrative mode); `method: measured` stops and asks.
   - With a known H, bench floors are within the DEM's vertical bias (~1 m).
 
 - **Shadow ends:** a shadow falls on the side away from the sun (`sun_azimuth_deg`, 135 = southeast). At the bench edge, the photo turns bright to dark moving away from the sun; at the far end of the shadow it turns dark to bright. Edges whose brightness gradient points away from the sun are therefore dropped, leaving one line per bench.
@@ -298,11 +297,12 @@ The user is an architect, not a programmer, so every feature must be reachable f
 - **Done:** stages 00–08, the app and launchers, and the UTF-8 fix for Windows. Tested on the user's real site: a marble quarry district at W29.31 S37.84 E29.39 N37.89 (UTM 35N).
 - **Real-site findings:**
   - The 30 m DEM (2011–2015) cannot confirm bench levels there.
-  - The bench lines traced in the photo plus the cut sheet give the terraced look the user approved.
+  - The bench lines traced in the photo gave the plan look the user approved; the carved benches (below) replace the shallow cut sheet.
   - The user reports that the sun is in the southeast.
 - **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
-- **Possible:** bench heights from shadow widths (this needs the sun elevation); strict "carve below DEM" mode; an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
-- **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with cut benches: 51% against 67% for the plain DEM (documented limit).
+- **Possible:** bench heights from shadow widths (this needs the sun elevation); an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
+- **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 8 m vs true 10 m): 49% against 67% for the plain DEM (documented limit).
+- **Carved benches (latest):** the user found the DEM-drop steps too sparse and shallow compared with the photo and real marble quarries (flat floors, prominent walls). Stage 07 now carves fixed-height walls snapped to the photo's bench lines (`bench_style: carved`). On the real site: 850 ha quarry, 8 m walls, 88% of the line length on a wall, mean cut 3.8 m.
 
 ## Out of scope for this task (later stages will use these outputs)
 - Haul-road and ramp reconstruction (benches and pit masks are now stage 07).

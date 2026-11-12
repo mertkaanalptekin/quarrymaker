@@ -221,3 +221,20 @@ def write_geojson(path, geoms, crs_name, props=None):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": crs_name}},
                    "features": feats}, fh)
+
+
+def road_mask(lum, sat, slope, res):
+    """Narrow bright unsaturated strips (roads, haul roads)."""
+    from terraces import box_blur, gauss
+    th = white_tophat(gauss(lum, 1.0).astype("float32"), max(1, int(round(12 / res))))
+    road = (th > 0.05) & (gauss(sat, 1.5) < 0.16) & (slope < 25)
+    return box_blur(road.astype(float), 1) > 0.5
+
+
+def yard_mask(lum, within, slope, res):
+    """Block stone depositing / staging yards: dense fields of small bright blocks."""
+    from terraces import gauss
+    blobs = white_tophat(lum, max(1, int(round(4 / res)))) > 0.08
+    dens = gauss(blobs.astype(float), 10 / res)
+    yard = within & (dens > 0.30) & (slope < 15)
+    return gauss(yard.astype(float), 3) > 0.5
