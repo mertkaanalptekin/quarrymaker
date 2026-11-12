@@ -118,6 +118,10 @@ def build_scene(job, meta, prm, ext, origin, r, log):
                                      (0.4, (1.0, 0.85, 0.25, 1)), (0.6, (0.9, 0.25, 0.15, 1)),
                                      (0.8, (0.15, 0.35, 1.0, 1)), (1.0, (0.75, 0.75, 0.8, 1))])
     mat_conf.use_fake_user = True
+    mat_meth = bl.attribute_material("MAT_bench_method", "bench_method_f",
+                                     [(0.0, (0.6, 0.6, 0.6, 1)), (0.5, (0.15, 0.75, 0.35, 1)),
+                                      (1.0, (1.0, 0.5, 0.1, 1))])
+    mat_meth.use_fake_user = True
     mat_cls.use_fake_user = True
 
     # --- interpreted patch ---
@@ -126,17 +130,24 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     bl.add_point_attribute(me, "terrace_class", data["classes"], "INT")
     bl.add_point_attribute(me, "terrace_class_f", data["classes"].astype("float32") / 5.0)
     bl.add_point_attribute(me, "dz_interp", data["dz"])
+    if "method" in data.files:
+        # 0 none, 1 benches confirmed by elevation data, 2 traced from the photo (illustrative)
+        bl.add_point_attribute(me, "bench_method", data["method"], "INT")
+        bl.add_point_attribute(me, "bench_method_f", data["method"].astype("float32") / 2.0)
     me.materials.append(mat)
     coll = bpy.data.collections.new("10_terraces")
     bpy.context.scene.collection.children.link(coll)
     terr = bpy.data.objects.new("TERRAIN_terraced", me)
     coll.objects.link(terr)
     terr["interpreted"] = True
-    terr["note"] = ("INTERPRETED benches inferred from imagery + DEM (not measured). "
-                    "Real coordinates = local XY + (origin_x, origin_y).")
+    terr["note"] = ("INTERPRETED benches inferred from imagery + DEM (not measured). Attribute "
+                    "bench_method: 1 = confirmed by elevation data, 2 = traced from the photo "
+                    "(illustrative heights). Real coordinates = local XY + (origin_x, origin_y).")
     for k in ("bench_height_m", "face_angle_deg", "coherence_R", "low_confidence",
-              "coherence_significance"):
-        terr[k] = prm[k]
+              "coherence_significance", "method"):
+        if prm.get(k) is not None:
+            terr[k] = prm[k]
+    terr["traced_areas"] = int((prm.get("traced") or {}).get("count", 0))
     terr["bench_floor_levels_m"] = [float(v) for v in prm["bench_floor_levels_m"]]
     terr["run_id"] = prm["run_id"]
 

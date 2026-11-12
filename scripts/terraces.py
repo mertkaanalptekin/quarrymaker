@@ -618,3 +618,215 @@ def zone_fields(tiles, zones, shape):
     # central half of a region (tent >= 0.25) counts fully; fade towards its edge
     evidence = np.clip(best / 0.25, 0, 1).astype("float32")
     return zidx, evidence
+
+
+# ----------------------------------------------------------------------
+# Image-traced (illustrative) benches
+# ----------------------------------------------------------------------
+# When the DEM is too coarse or too old to confirm bench levels, the bench
+# edges can still be traced from the photo: parallel step lines have a clear
+# direction and spacing. A bank of oriented band-pass (Gabor) filters gives,
+# per pixel, the direction, the horizontal spacing p and the position inside
+# the step (phase). The DEM supplies the overall slope s, so one step rises
+# H = s * p. Steps are added on top of the measured surface (zero-mean), so
+# hills and low points stay where the DEM puts them.
+
+
+def oriented_periodic(lum, res, spacings_m=(6, 8, 10.5, 14, 18, 24), n_orient=8,
+                      bandwidth=0.2, tile_px=384, overlap=64):
+    """Per pixel: amplitude, phase, orientation (radians, wave-vector direction
+    in (row, col) coordinates), spacing (m) and peakiness of the strongest
+    oriented periodic pattern. The narrow band (bandwidth) needs about three
+    repeats to respond; peakiness = best amplitude / mean amplitude over the
+    spacings at that orientation (a single wall or road responds at all
+    spacings, a staircase at one)."""
+    H, W = lum.shape
+    out = {k: np.zeros((H, W), "float32") for k in ("amp", "phase", "theta", "spacing", "peak")}
+    step = tile_px - 2 * overlap
+    fy = np.fft.fftfreq(tile_px)[:, None]
+    fx = np.fft.fftfreq(tile_px)[None, :]
+    ramp = 0.5 * (1 - np.cos(np.linspace(0, np.pi, overlap)))
+    win1 = np.ones(tile_px)
+    win1[:overlap] = ramp
+    win1[-overlap:] = ramp[::-1]
+    taper = np.outer(win1, win1).astype("float32")
+    bank = []
+    for k in range(n_orient):
+        th = np.pi * k / n_orient
+        row = []
+        for p in spacings_m:
+            f0 = res / p
+            u0, v0 = f0 * np.sin(th), f0 * np.cos(th)
+            sf = bandwidth * f0
+            row.append((np.exp(-((fy - u0) ** 2 + (fx - v0) ** 2) / (2 * sf * sf)).astype("float32"), p))
+        bank.append((th, row))
+    lum = lum.astype("float32")
+    for r0 in range(-overlap, H, step):
+        for c0 in range(-overlap, W, step):
+            rs, cs = max(0, r0), max(0, c0)
+            re, ce = min(H, r0 + tile_px), min(W, c0 + tile_px)
+            sub = lum[rs:re, cs:ce]
+            if sub.size == 0 or float(sub.std()) < 1e-4:
+                continue
+            tile = np.zeros((tile_px, tile_px), "float32")
+            tile[rs - r0:rs - r0 + sub.shape[0], cs - c0:cs - c0 + sub.shape[1]] = sub - sub.mean()
+            F = np.fft.fft2(tile * taper)
+            best = np.zeros((tile_px, tile_px), "float32")
+            b_ph = np.zeros_like(best)
+            b_th = np.zeros_like(best)
+            b_p = np.zeros_like(best)
+            b_pk = np.zeros_like(best)
+            for th, row in bank:
+                amps, phs = [], []
+                for G, p in row:
+                    r = np.fft.ifft2(F * G)
+                    amps.append(np.abs(r).astype("float32"))
+                    phs.append(np.angle(r).astype("float32"))
+                A = np.stack(amps)
+                i_best = A.argmax(0)
+                a_best = np.take_along_axis(A, i_best[None], 0)[0]
+                m = a_best > best
+                if m.any():
+                    best[m] = a_best[m]
+                    b_ph[m] = np.take_along_axis(np.stack(phs), i_best[None], 0)[0][m]
+                    b_th[m] = th
+                    b_p[m] = np.array([p for _, p in row], "float32")[i_best][m]
+                    b_pk[m] = (a_best / (A.mean(0) + 1e-9))[m]
+            ir0, ic0 = max(rs, r0 + overlap), max(cs, c0 + overlap)
+            ir1, ic1 = min(re, r0 + tile_px - overlap), min(ce, c0 + tile_px - overlap)
+            if ir1 <= ir0 or ic1 <= ic0:
+                continue
+            st = (slice(ir0 - r0, ir1 - r0), slice(ic0 - c0, ic1 - c0))
+            sl = (slice(ir0, ir1), slice(ic0, ic1))
+            out["amp"][sl] = best[st]
+            out["phase"][sl] = b_ph[st]
+            out["theta"][sl] = b_th[st]
+            out["spacing"][sl] = b_p[st]
+            out["peak"][sl] = b_pk[st]
+    return out
+
+
+def oriented_periodic_from_file(ortho_path, dst_transform, dst_shape, crs, within=None,
+                                block_m=480.0, log=None):
+    """Run oriented_periodic at the photo's full resolution, block by block,
+    and transfer the results to the (coarser) analysis grid. Only blocks
+    that touch `within` are processed. Phase is transferred as an
+    amplitude-weighted complex average, the rest by averaging/nearest."""
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.warp import reproject
+    from rasterio.windows import from_bounds
+
+    Hd, Wd = dst_shape
+    res_d = dst_transform.a
+    bpx = max(64, int(round(block_m / res_d)))
+    keys = ("rel", "coh", "cos", "sin", "theta", "spacing", "peak")
+    dst = {k: np.zeros(dst_shape, "float32") for k in keys}
+    margin_m = 60.0
+    with rasterio.open(ortho_path) as src:
+        res_s = src.res[0]
+        blocks = [(r0, c0) for r0 in range(0, Hd, bpx) for c0 in range(0, Wd, bpx)
+                  if within is None or within[r0:r0 + bpx, c0:c0 + bpx].any()]
+        for n, (r0, c0) in enumerate(blocks):
+            r1, c1 = min(Hd, r0 + bpx), min(Wd, c0 + bpx)
+            x0 = dst_transform.c + c0 * res_d - margin_m
+            y1 = dst_transform.f - r0 * res_d + margin_m
+            x1 = dst_transform.c + c1 * res_d + margin_m
+            y0 = dst_transform.f - r1 * res_d - margin_m
+            win = from_bounds(x0, y0, x1, y1, src.transform).round_offsets().round_lengths()
+            rgb = src.read([1, 2, 3], window=win, boundless=True, fill_value=0).astype("float32")
+            lum = rgb.mean(0) / 255.0
+            stf = src.window_transform(win)
+            r = oriented_periodic(lum, res_s)
+            # strength relative to local contrast, and direction consistency,
+            # both measured at the photo's own resolution
+            contrast = gauss(np.abs(lum - gauss(lum, 8 / res_s)), 20 / res_s) + 1e-3
+            r["rel"] = (r["amp"] / contrast).astype("float32")
+            e2 = r["rel"] * np.exp(2j * r["theta"])
+            r["coh"] = (np.abs(gauss_complex(e2, 15 / res_s)) / (gauss(r["rel"], 15 / res_s) + 1e-9)).astype("float32")
+            r["cos"] = r["rel"] * np.cos(r["phase"])
+            r["sin"] = r["rel"] * np.sin(r["phase"])
+            # doubled-angle trick keeps orientation averaging valid; nearest is fine here
+            sub_tf = rasterio.transform.from_origin(dst_transform.c + c0 * res_d, dst_transform.f - r0 * res_d,
+                                                    res_d, res_d)
+            for k in keys:
+                tmp = np.zeros((r1 - r0, c1 - c0), "float32")
+                rs = Resampling.nearest if k in ("theta", "spacing") else Resampling.average
+                reproject(r[k], tmp, src_transform=stf, src_crs=crs, dst_transform=sub_tf, dst_crs=crs,
+                          resampling=rs)
+                dst[k][r0:r1, c0:c1] = tmp
+            if log and (n + 1) % 10 == 0:
+                log.info("  traced benches: %d/%d blocks", n + 1, len(blocks))
+    return {"rel": dst["rel"], "coh": dst["coh"], "phase": np.arctan2(dst["sin"], dst["cos"]).astype("float32"),
+            "theta": dst["theta"], "spacing": dst["spacing"], "peak": dst["peak"]}
+
+
+TRACE_SENSITIVITY = {
+    # line strength vs local contrast, direction consistency, steps deep across the lines
+    "low": {"rel_min": 0.42, "coh_min": 0.82, "depth_min": 3.0},
+    "medium": {"rel_min": 0.36, "coh_min": 0.78, "depth_min": 2.5},
+    "high": {"rel_min": 0.30, "coh_min": 0.72, "depth_min": 2.0},
+}
+
+
+def traced_benches(periodic, z0, res, within, transform, face_angle_deg=75.0, sensitivity="medium",
+                   slope_min_deg=2.0, min_area_m2=2000.0, h_min=0.3, h_max=25.0):
+    """Illustrative benches traced from the photo (see the section comment).
+
+    periodic: result of oriented_periodic_from_file (photo at full resolution,
+    transferred to the analysis grid). An area counts as a staircase when its
+    lines are strong, consistently oriented, and span at least `depth_min`
+    steps across their own direction (a road or a single wall does not).
+    The step height is slope x spacing from the DEM, so hills and low points
+    stay where the DEM puts them.
+
+    Returns a dict: dev (height to add, m), weight (0..1), face (bool),
+    stepped (bool), H (step height per pixel), spacing, areas (list)."""
+    import math as _m
+    prm = TRACE_SENSITIVITY.get(str(sensitivity).lower(), TRACE_SENSITIVITY["medium"])
+    rel, coh, ph, th, sp = (periodic[k] for k in ("rel", "coh", "phase", "theta", "spacing"))
+    zs = gauss(z0, 12 / res)
+    gr, gc = np.gradient(zs, res)
+    # the image's row axis points south, the DEM gradient is in (row, col) too
+    s_k = gr * np.sin(th) + gc * np.cos(th)          # rise per metre along the wave vector
+    slope = overall_slope_deg(zs, res)
+    cand = within & (rel > prm["rel_min"]) & (coh > prm["coh_min"]) & (slope > slope_min_deg)
+    rc = max(1, int(round(8 / res)))
+    cand = box_blur(box_blur(cand.astype(float), rc) > 0.15, rc) > 0.85
+    cand &= within
+    H = np.zeros(z0.shape, "float32")
+    keep = np.zeros(z0.shape, bool)
+    areas = []
+    if cand.any():
+        labels, polys = label_components(cand, transform)
+        rows, cols = np.indices(cand.shape, dtype="float32")
+        for i, poly in enumerate(polys):
+            if poly.area < min_area_m2:
+                continue
+            sel = labels == i + 1
+            t = 0.5 * np.angle(np.mean(np.exp(2j * th[sel])))
+            across = (rows[sel] * np.sin(t) + cols[sel] * np.cos(t)) * res
+            p_med = float(np.median(sp[sel]))
+            depth = float(np.percentile(across, 95) - np.percentile(across, 5)) / max(p_med, 1e-6)
+            if depth < prm["depth_min"]:
+                continue
+            s_med = float(np.median(np.abs(s_k[sel])))
+            h = float(np.clip(s_med * p_med, h_min, h_max))   # one step rises slope x spacing
+            H[sel] = h
+            keep |= sel
+            c = poly.centroid
+            areas.append({"area_m2": round(poly.area), "spacing_m": round(p_med, 1),
+                          "steps_deep": round(depth, 1), "slope_pct": round(100 * s_med, 1),
+                          "bench_height_m": round(h, 2), "centre": [round(c.x), round(c.y)]})
+    # position inside the step: u grows uphill; the face is put where the photo
+    # is darkest (usually the shadowed face)
+    sign = np.where(s_k >= 0, 1.0, -1.0)
+    u = sign * (ph - np.pi) / (2 * np.pi)
+    Hs = np.maximum(H, 1e-3).astype("float64")
+    phi = np.clip(np.tan(np.radians(slope)) / _m.tan(_m.radians(face_angle_deg)), 0.05, 0.9)
+    zst, face, _ = staircase(u * Hs, 0.0, Hs, phi)
+    dev = np.where(keep, zst - u * Hs, 0.0)
+    weight = np.clip(gauss(keep.astype(float), 4 / res) * 1.6, 0, 1) * keep
+    return {"dev": dev.astype("float32"), "weight": weight.astype("float32"), "face": face & keep,
+            "stepped": keep, "H": H, "spacing": np.where(keep, sp, 0).astype("float32"),
+            "areas": sorted(areas, key=lambda a: -a["area_m2"])}

@@ -54,3 +54,6 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   min_significance: 2.0     # a region's pattern must beat shifted edge maps by this factor
   bare_ground_only: true    # look for benches on bare rock/soil only, not on vegetation
   max_bench_width_m: 60     # wider implied bench floors are not quarry benches
+  method: auto              # auto = confirmed benches where the elevation data allows, plus benches traced
+                            #        from the photo elsewhere (illustrative) | measured | traced
+  trace_sensitivity: medium # low | medium | high: how readily step lines in the photo count as benches
