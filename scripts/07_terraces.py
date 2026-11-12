@@ -217,7 +217,11 @@ def main(argv=None) -> int:
     tiles = T.regional_scan(zl, wp, zone, res, float(tc["region_size_m"]), hmin, hmax, fixed_h=fixed_h)
     for i_, t_ in enumerate(tiles):
         t_["_i"] = i_
+    n_local = sum(1 for t in tiles if T.tile_is_significant(t, sig_min))
+    rstar = T.apply_sitewide_threshold(tiles, sig_min)
     sig_tiles = [t for t in tiles if T.tile_is_significant(t, sig_min)]
+    log.info("Site-wide chance level (many regions tested): %d region(s) passed alone, %d also beat "
+             "the site-wide chance level (x%.1f of a typical null)", n_local, len(sig_tiles), rstar)
     log.info("Tested %d regions of %.0f m: %d show a clear bench pattern (x%.1f or more above "
              "shifted edge maps)", len(tiles), float(tc["region_size_m"]), len(sig_tiles), sig_min)
     od.mkdir(parents=True, exist_ok=True)
@@ -258,6 +262,11 @@ def main(argv=None) -> int:
             dropped += 1
             log.info("Candidate bench zone of %d regions dropped: zone test x%.1f < x%.1f",
                      len(g), sol["sig"], sig_min)
+            continue
+        if len(g) == 1 and sol["sig"] < 1.5 * sig_min and not forced:
+            dropped += 1
+            log.info("Isolated single region dropped: needs x%.1f on its own, has x%.1f",
+                     1.5 * sig_min, sol["sig"])
             continue
         # plausibility: real quarry benches have floors a few to some tens of
         # metres wide, and a height inside the search range (not at its edge)
@@ -420,10 +429,10 @@ def main(argv=None) -> int:
                              "(surface_correction.tif). Values above are for the largest zone."),
         "regions": {"size_m": float(tc["region_size_m"]), "tested": len(tiles),
                     "with_benches": sum(1 for t in tiles if T.tile_is_significant(t, sig_min)),
-                    "min_significance": sig_min,
+                    "min_significance": sig_min, "sitewide_chance_ratio": rstar,
                     "pit_area_with_benches_pct": float(100 * (evidence[zone] > 0.5).mean()) if zone.any() else 0.0,
                     "list": [{k2: (round(v, 3) if isinstance(v, float) else v) for k2, v in t.items()
-                              if k2 not in ("curve", "hs", "_i")} for t in tiles]},
+                              if k2 not in ("curve", "hs", "_i", "nulls")} for t in tiles]},
         "surface_correction_m": {"mean": float(-(delta * wb)[zone].mean()) if zone.any() else 0.0,
                                  "abs_mean": float(np.abs(delta * wb)[zone].mean()) if zone.any() else 0.0},
         "coherence_R": est["R"], "coherence_baseline": est["R_baseline"],

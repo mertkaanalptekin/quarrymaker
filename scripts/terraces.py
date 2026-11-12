@@ -429,9 +429,27 @@ def regional_scan(zl, w, zone, res, tile_m, h_min, h_max, fixed_h=None, n_null=8
             tiles.append({"r0": r0, "r1": r1, "c0": c0, "c1": c1, "n": n, "H": H,
                           "curve": score, "hs": hs,
                           "level": float((np.angle(Ce[i]) / (2 * np.pi)) * H % H),
-                          "score": float(score[i]), "null": null,
+                          "score": float(score[i]), "null": null, "nulls": nulls,
+                          "null_med": float(np.median(nulls)) if nulls else 0.0,
                           "sig": float(score[i] / max(null, 1e-6))})
     return tiles
+
+
+def apply_sitewide_threshold(tiles, sig_min):
+    """Correct for testing many regions at once.
+
+    With ~100+ regions, a few pass a per-region test by chance. The null
+    scores of ALL regions are pooled (each relative to its own median null
+    score) into one site-wide chance level: a region must beat its own best
+    null by sig_min AND the largest chance ratio seen anywhere on the site.
+    Each tile's 'sig' becomes this combined value (>= sig_min means significant)."""
+    ratios = [n / max(t["null_med"], 1e-6) for t in tiles for n in t.get("nulls", [])]
+    rstar = max(ratios) if ratios else 0.0
+    for t in tiles:
+        t["sig_local"] = t["sig"]
+        site = t["score"] / max(rstar * t["null_med"], 1e-6) * sig_min if rstar > 0 else t["sig"]
+        t["sig"] = float(min(t["sig"], site))
+    return rstar
 
 
 def tile_is_significant(t, sig_min=1.5, score_min=0.05):
