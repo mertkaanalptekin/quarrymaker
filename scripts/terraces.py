@@ -964,79 +964,141 @@ def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_d
     return float(np.median(h)), int(h.size)
 
 
-def carve_levels(z0, lines, within, res, bench_h, face_angle_deg=80.0, smooth_m=12.0, snap_m=12.0,
-                 feather_m=20.0, island_m=8.0, level=None):
-    """Benches carved into the terrain at fixed levels (marble quarries: flat
-    floors, tall near-vertical walls), with the walls snapped to the bench
-    lines traced in the photo.
+def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, field_m=30.0,
+                  reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
+                  feather_m=20.0, carve=0.5):
+    """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
-    1. A smooth surface z_s (DEM filtered at smooth_m) is split into levels
-       level + n*H; floors are flat, faces rise at face_angle_deg between them
-       (they cover tan(slope)/tan(face) of each step), cut H/2 below so the
-       quarry is carved out of the measured ground, never built up.
-    2. Snapping: at every bench-line pixel z_s is shifted (at most H/2) onto
-       the nearest wall position; the shifts are spread smoothly over snap_m
-       (screened Poisson), so the walls run along the photo's lines.
-    The change is faded out over feather_m at the quarry outline.
+    1. At each line pixel: the bench direction (structure tensor of the
+       lines), the downhill side (DEM smoothed at dir_m) and the spacing to
+       the next line downhill (the bench width seen in the photo).
+    2. These are spread over the quarry (normalised convolution at field_m);
+       their weight fades to zero beyond reach_m from any line, so no
+       benches are invented where the photo shows none.
+    3. A bench number u is solved whose gradient is (downhill normal /
+       spacing): its contour lines run along the photo's benches, one per
+       bench. u is then snapped to whole numbers on the traced lines.
+    4. Floors are flat steps of u (one bench height H each) with walls at
+       face_angle_deg, laid on the DEM smoothed at base_m; the whole system is
+       lowered carve*H (carved into the ground). Every wall is a full bench
+       high; where the photo's benches end, the walls end.
     Returns (dz, info)."""
     H = float(bench_h)
     rows = np.where(within.any(1))[0]
     cols = np.where(within.any(0))[0]
     if rows.size == 0:
         return np.zeros(z0.shape, "float32"), {}
-    pad = int(round(max(smooth_m, snap_m, feather_m) * 3 / res))
+    pad = int(round(max(feather_m, reach_m) / res)) + 2
     r0, r1 = max(0, rows[0] - pad), min(z0.shape[0], rows[-1] + 1 + pad)
     c0, c1 = max(0, cols[0] - pad), min(z0.shape[1], cols[-1] + 1 + pad)
     sl = (slice(r0, r1), slice(c0, c1))
     zc, wc = z0[sl].astype("float64"), within[sl]
-    lc = lines[sl] & wc
-    z_s = gauss(zc, smooth_m / 2 / res)
-    if level is None:      # phase that puts the most line pixels on wall positions
-        ph = np.exp(2j * np.pi * z_s[lc] / H)
-        level = float(np.angle(ph.mean()) / (2 * np.pi) * H) if lc.any() else 0.0
-    u = (z_s - level) / H
-    t = np.where(lc, (np.round(u) - u) * H, 0.0)
-    # screened Poisson spread of the snap shifts: (W + lam + L) c = W t
-    wdat = np.where(lc, 20.0, 0.0)
-    lam = (res / snap_m) ** 2
+    from linework import thin
+    sk = thin(lines[sl] & wc)
+    if sk.sum() < 10:
+        return np.zeros(z0.shape, "float32"), {"line_length_km": 0.0}
+    Hh, Ww = zc.shape
+    # 1. direction (doubled-angle tensor), downhill sign, spacing
+    s = sk.astype(float)
+    gy, gx = np.gradient(gauss(s, 1.0))
+    jxx, jyy, jxy = gauss(gx * gx, 2.0), gauss(gy * gy, 2.0), gauss(gx * gy, 2.0)
+    ang = 0.5 * np.arctan2(2 * jxy, jxx - jyy)
+    nx, ny = np.cos(ang), np.sin(ang)
+    zs = gauss(zc, dir_m / 2 / res)
+    dzy, dzx = np.gradient(zs, res)
+    sg = -np.sign(nx * dzx + ny * dzy)
+    sg[sg == 0] = 1.0
+    nx, ny = nx * sg, ny * sg                         # downhill normal
+    rr, cc = np.nonzero(sk)
+    gap = np.full(rr.size, np.nan)
+    alive = np.ones(rr.size, bool)
+    for k in range(3, int(max_spacing_m / res) + 1):
+        r = np.round(rr + ny[rr, cc] * k).astype(int)
+        c = np.round(cc + nx[rr, cc] * k).astype(int)
+        inb = (r >= 0) & (r < Hh) & (c >= 0) & (c < Ww)
+        hit = np.zeros(rr.size, bool)
+        hit[inb] = sk[r[inb], c[inb]]
+        new = alive & hit
+        gap[new] = k * res
+        alive &= ~hit & inb
+    have = np.isfinite(gap)
+    sp_med = float(np.median(gap[have])) if have.any() else 20.0
+    # 2. spread (normalised convolution); direction via the doubled angle so +-n agree
+    sig = field_m / 2 / res
+    wl = np.zeros((Hh, Ww))
+    wl[rr, cc] = 1.0
+    c2 = gauss(wl * np.cos(2 * ang), sig)
+    s2 = gauss(wl * np.sin(2 * ang), sig)
+    fq = np.zeros((Hh, Ww))
+    wq = np.zeros((Hh, Ww))
+    fq[rr[have], cc[have]] = 1.0 / gap[have]
+    wq[rr[have], cc[have]] = 1.0
+    freq = gauss(fq, sig) / np.maximum(gauss(wq, sig), 1e-9)
+    freq = np.where(gauss(wq, sig) > 1e-4, freq, 1.0 / sp_med)
+    freq = gauss(freq, sig)
+    angf = 0.5 * np.arctan2(s2, c2)
+    fx, fy = np.cos(angf), np.sin(angf)
+    sgf = -np.sign(fx * dzx + fy * dzy)
+    sgf[sgf == 0] = 1.0
+    fx, fy = fx * sgf, fy * sgf
+    # presence: 1 near lines, fading to 0 beyond reach_m
+    near = gauss(wl, reach_m / 2 / res)
+    pres = np.clip(near / max(float(np.percentile(near[sk], 25)), 1e-9), 0, 1) * wc
+    # 3. u with grad u = -(downhill normal) * freq  (u counts benches upward)
+    gxu = -fx * freq * pres
+    gyu = -fy * freq * pres
+    tx = 0.5 * (gxu + _shift(gxu, 0, -1)) * res
+    ty = 0.5 * (gyu + _shift(gyu, -1, 0)) * res
+    wx = np.ones((Hh, Ww))
+    wy = np.ones((Hh, Ww))
+    wx[:, -1] = 0.0
+    wy[-1, :] = 0.0
+    lam = (res / 2000.0) ** 2
 
-    def A(x):
+    def A(z):
+        dxp = wx * (z - _shift(z, 0, -1))
+        dyp = wy * (z - _shift(z, -1, 0))
+        return lam * z + dxp - _shift(dxp, 0, 1) + dyp - _shift(dyp, 1, 0)
+
+    wtx, wty = wx * tx, wy * ty
+    b = -wtx + _shift(wtx, 0, 1) - wty + _shift(wty, 1, 0)
+    diag = lam + wx + _shift(wx, 0, 1) + wy + _shift(wy, 1, 0)
+    u = _cg(A, b, np.zeros_like(zc), diag, iters=1500, tol=1e-6)
+    # snap: whole numbers on the traced lines (the wall is the line)
+    tgt = np.where(sk, np.round(u) - u, 0.0)
+    wd = np.where(sk, 20.0, 0.0)
+    lam2 = (res / snap_m) ** 2
+
+    def A2(x):
         dxp = x - _shift(x, 0, -1)
         dyp = x - _shift(x, -1, 0)
         dxp[:, -1] = 0.0
         dyp[-1, :] = 0.0
-        return (wdat + lam) * x + dxp - _shift(dxp, 0, 1) + dyp - _shift(dyp, 1, 0)
+        return (wd + lam2) * x + dxp - _shift(dxp, 0, 1) + dyp - _shift(dyp, 1, 0)
 
-    diag = wdat + lam + 4.0
-    corr = _cg(A, wdat * t, np.zeros_like(zc), diag, iters=500, tol=1e-4) if lc.any() else np.zeros_like(zc)
-    corr = np.clip(corr, -H / 2, H / 2)
-    zsn = z_s + corr
-    gr, gc = np.gradient(z_s, res)
-    slope = np.degrees(np.arctan(np.hypot(gr, gc)))
-    phi = np.clip(np.tan(np.radians(slope)) / np.tan(np.radians(face_angle_deg)), 0.02, 0.9)
-    u = (zsn - level) / H
+    corr = _cg(A2, wd * tgt, np.zeros_like(zc), wd + lam2 + 4.0, iters=600, tol=1e-5)
+    u = u + np.clip(corr, -0.5, 0.5) * np.clip(pres * 2, 0, 1)
+    # 4. staircase of u on the smoothed DEM
+    zb = gauss(zc, base_m / 2 / res)
+    gmag = np.hypot(*np.gradient(u, res)) * H            # implied slope of the bench system
+    phi = np.clip(gmag / np.tan(np.radians(face_angle_deg)), 0.02, 0.9)
     n = np.floor(u + 0.5)
-    r = u - n
+    rfr = u - n
     half = phi / 2
-    g = np.where(r < -half, n - 0.5, np.where(r >= half, n + 0.5, n - 0.5 + (r + half) / phi))
-    face = np.abs(r) < half
-    # small islands of another level (snapping fragments) join their surroundings
-    for _ in range(2):
-        gs = gauss(g, island_m / 2 / res)
-        fix = ~face & (np.abs(g - gs) > 0.5)
-        g = np.where(fix, np.round(gs - 0.5) + 0.5, g)
-    z_st = level + H * g - H / 2.0                          # carve: floors below the ground
-    feather = gauss(wc.astype(float), feather_m / 2 / res) * wc
-    feather = np.clip((feather - 0.5) * 2.0, 0, 1)
-    dz = feather * (z_st - zc)
-    dz = np.minimum(dz, 0.0)                                # never above the measured ground
+    st = np.where(rfr < -half, n - 0.5, np.where(rfr >= half, n + 0.5, n - 0.5 + (rfr + half) / phi))
+    zt = zb + H * (st - u) - carve * H
+    # where the photo shows no benches keep the measured ground (smooth hand-over)
+    zt = pres * zt + (1 - pres) * (zc - carve * H * pres)
+    fe = gauss(wc.astype(float), feather_m / 2 / res) * wc
+    fe = np.clip((fe - 0.5) * 2.0, 0, 1)
+    dz = fe * (zt - zc)
     out = np.zeros(z0.shape, "float32")
     out[sl] = dz
-    walls = face & wc & (feather > 0.5)
-    info = {"bench_height_m": round(H, 2), "level_m": round(level, 2), "face_angle_deg": face_angle_deg,
-            "line_length_km": round(float(lc.sum()) * res / 1000.0, 1),
-            "snap_shift_median_m": round(float(np.median(np.abs(t[lc]))), 2) if lc.any() else None,
-            "lines_on_walls_pct": round(100.0 * float((face & lc).sum()) / max(1, int(lc.sum())), 1),
-            "mean_cut_m": round(float(-dz[wc].mean()), 2), "max_cut_m": round(float(-dz.min()), 1),
-            "wall_area_ha": round(float(walls.sum()) * res * res / 1e4, 1)}
+    face = (np.abs(rfr) < half) & (pres > 0.5) & wc
+    on_wall = float((face & sk).sum()) / max(1, int(sk.sum()))
+    info = {"bench_height_m": round(H, 2), "line_length_km": round(float(sk.sum()) * res / 1000.0, 1),
+            "bench_spacing_median_m": round(sp_med, 1), "lines_on_walls_pct": round(100 * on_wall, 1),
+            "benched_area_ha": round(float(((pres > 0.5) & wc).sum()) * res * res / 1e4, 1),
+            "mean_dz_m": round(float(dz[wc].mean()), 2), "max_cut_m": round(float(-dz.min()), 1),
+            "max_fill_m": round(float(dz.max()), 1)}
     return out, info

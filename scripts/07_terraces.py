@@ -63,7 +63,7 @@ DEFAULTS = {
     "max_cut_m": 12.0,              # largest change allowed by the cut benches
     "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
     "bench_style": "carved",        # carved = fixed-height walls, flat floors | dem_steps = steps as tall as the DEM drop
-    "carve_bench_height_m": 8.0,    # wall height for carved benches when bench_height_m is auto
+    "carve_bench_height_m": 9.0,    # wall height for carved benches when bench_height_m is auto
     "wall_angle_deg": 80.0,         # carved walls (marble quarries: near vertical)
 }
 
@@ -399,12 +399,14 @@ def main(argv=None) -> int:
             lines = lines & ~excl
             log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
             Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
-            dz_l, linfo = T.carve_levels(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
-                                         face_angle_deg=float(tc["wall_angle_deg"]))
+            dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
+                                          face_angle_deg=float(tc["wall_angle_deg"]))
             linfo["bench_height_source"] = "your value" if fixed_h is not None else "default guess (carve_bench_height_m)"
             if linfo:
-                log.info("Carved benches: %s m walls, %.1f%% of the bench lines on a wall, mean cut %s m",
-                         linfo.get("bench_height_m"), linfo.get("lines_on_walls_pct", 0), linfo.get("mean_cut_m"))
+                log.info("Carved benches: %s m walls, bench spacing in the photo %s m, %.1f%% of the bench "
+                         "lines on a wall, mean change %s m", linfo.get("bench_height_m"),
+                         linfo.get("bench_spacing_median_m"), linfo.get("lines_on_walls_pct", 0),
+                         linfo.get("mean_dz_m"))
             else:
                 log.info("No area left for carved benches (all of it is confirmed by the elevation data)")
         else:
@@ -557,9 +559,11 @@ def main(argv=None) -> int:
         "method": method,
         "traced": {**(trc["info"] if trc else {}),
                    "area_ha": round(float(trc["affected"].sum()) * res * res / 1e4, 1) if trc else 0.0,
-                   "note": (("Illustrative: benches carved into the measured ground at fixed levels "
-                             "(one wall every bench height, flat floors between), with the walls moved onto "
-                             "the bench lines traced in the photo. The bench height is "
+                   "note": (("Illustrative: the benches are laid out by the bench lines traced in the "
+                             "photo (their direction and spacing), not by the elevation data's contours; each "
+                             "wall is one full bench height, floors are flat, and the overall shape follows "
+                             "the elevation data smoothed at 60 m. Where the photo shows no benches the "
+                             "measured ground is kept. The bench height is "
                              + str((trc["info"] if trc else {}).get("bench_height_source", "")) + ".")
                             if trc and trc["info"].get("style") == "carved" else
                             ("Illustrative: bench lines traced in the photo (light/dark edges of faces and "
@@ -640,9 +644,10 @@ def main(argv=None) -> int:
     if trc is not None and trc["info"].get("style") == "carved":
         dzc = trc["dz"][trc["affected"]] if trc["affected"].any() else np.zeros(1)
         Hc_ = float(trc["info"].get("bench_height_m") or Hb)
-        ok_c = float(dzc.max()) <= 0.01 and float(dzc.mean()) >= -Hc_
-        checks.append(("Carved benches lie under the measured ground (cut only, mean cut at most H)", ok_c,
-                       f"carved change: max {float(dzc.max()):+.2f} m, mean {float(dzc.mean()):+.2f} m, wall height {Hc_:.2f} m"))
+        ok_c = -Hc_ <= float(dzc.mean()) <= 0.01 and float(dzc.max()) <= Hc_
+        checks.append(("Carved benches: mostly cut into the ground (mean change between -H and 0, fill at most H)",
+                       ok_c, f"carved change: mean {float(dzc.mean()):+.2f} m, max fill {float(dzc.max()):+.2f} m, "
+                             f"max cut {float(dzc.min()):+.2f} m, wall height {Hc_:.2f} m"))
     else:
         checks.append(("No systematic shift vs measured (mean dz within 25% of H)", abs(mdz) <= 0.25 * Hb,
                        f"mean dz {mdz:+.2f} m, std {params['dz_in_bench_zone']['std']:.2f} m, H {Hb:.2f} m"))
@@ -957,10 +962,11 @@ def make_report(paths, meta, p, checks, br, imgs, files) -> str:
         "",
         *(["### Benches carved along the photo's bench lines (illustrative)",
            f"{p['traced'].get('line_length_km', 0)} km of bench lines; {p['traced']['area_ha']:.1f} ha changed. "
-           f"Wall height {p['traced'].get('bench_height_m')} m ({p['traced'].get('bench_height_source')}), "
-           f"walls at {p['traced'].get('face_angle_deg')} deg; {p['traced'].get('lines_on_walls_pct')}% of the "
-           f"bench-line length lies on a wall; mean cut {p['traced'].get('mean_cut_m')} m, "
-           f"deepest {p['traced'].get('max_cut_m')} m. {p['traced']['note']}",
+           f"Wall height {p['traced'].get('bench_height_m')} m ({p['traced'].get('bench_height_source')}); "
+           f"bench spacing in the photo (median) {p['traced'].get('bench_spacing_median_m')} m; "
+           f"{p['traced'].get('lines_on_walls_pct')}% of the bench-line length lies on a wall; "
+           f"mean change {p['traced'].get('mean_dz_m')} m, deepest cut {p['traced'].get('max_cut_m')} m, "
+           f"largest fill {p['traced'].get('max_fill_m')} m. {p['traced']['note']}",
            ""] if p.get("traced", {}).get("area_ha") and p["traced"].get("style") == "carved" else []),
         *(["### Benches cut along the photo's bench lines (illustrative)",
            f"{p['traced'].get('line_length_km', 0)} km of bench lines; {p['traced']['area_ha']:.1f} ha changed. "

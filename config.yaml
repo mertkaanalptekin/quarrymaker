@@ -61,9 +61,9 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   bench_smoothing_m: 30     # dem_steps only: how strongly the ground between bench lines is flattened
   max_cut_m: 12             # dem_steps only: largest change allowed by the cut benches
   sun_azimuth_deg: 135      # direction of the sun in the photo (135 = southeast); shadow ends are not benches
-  bench_style: carved       # carved = benches cut into the ground with walls of one fixed height and flat
+  bench_style: carved       # carved = benches laid out by the photo's bench lines, walls of one fixed height, flat
                             #          floors (marble quarries) | dem_steps = steps only as tall as the DEM drop
-  carve_bench_height_m: 8   # wall height used by carved benches when bench_height_m is auto (a guess)
+  carve_bench_height_m: 9   # wall height used by carved benches when bench_height_m is auto (a guess, 8-10 m plausible)
   wall_angle_deg: 80        # steepness of the carved walls (90 = vertical)
 plan:                   # stage 08 - plan linework for Rhino/CAD (DXF + GeoJSON)
   enabled: true
