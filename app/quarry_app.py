@@ -48,6 +48,8 @@ STAGE_INFO = {
     "06": ("Check the results", "Measures the results (scale, position, heights) and renders preview images."),
     "07": ("Calculate the benches", "Calculates the quarry benches (terraces) from the satellite image "
                                     "and the height data."),
+    "09": ("Compare the years", "Finds the quarry area on every different archived satellite photo "
+                                "(Esri Wayback, 2014 onwards) and shows how the quarry grew."),
     "08": ("Draw the plan linework", "Draws bench lines, quarry outline, roads, farmland and block yards "
                                      "as a DXF file for Rhino / CAD."),
 }
@@ -176,6 +178,7 @@ def results(paths):
          PROJECT / "terrain" / "10_terraces" / paths.run_id / "quarry_terraced.blend", "blend"),
         ("Rhino files", paths.rhino, "folder"),
         ("Plan linework (DXF for Rhino / CAD)", paths.rhino / "plan", "folder"),
+        ("Quarry expansion over time", PROJECT / "terrain" / "20_expansion" / paths.run_id, "folder"),
         ("Gaea package", paths.gaea, "folder"),
         ("Report: terrain", base / "report.md", "file"),
         ("Report: benches", PROJECT / "terrain" / "10_terraces" / paths.run_id / "report_terraces.md", "file"),

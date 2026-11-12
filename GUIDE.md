@@ -172,6 +172,16 @@ Step 8 writes `quarry_plan.dxf` (open it in Rhino with units set to Meters) with
 The coordinates match the Rhino OBJ (local metres; see README_plan.md for the origin). All
 layers are traced automatically and are interpretations, not a survey.
 
+## Quarry expansion over time (step 9)
+
+Step 9 looks through Esri's archive of older satellite maps (World Imagery Wayback, 2014 onwards).
+It keeps each different photo of your site, finds the quarry area on each in the same way, and
+reports the area per date. It also draws a map of where the quarry grew, and writes
+`quarry_expansion.dxf` with one outline layer per date.
+
+The dates are when each photo appeared in Esri's map; the photo itself was taken somewhat
+earlier. Photos differ in season and colour, so compare outlines by eye as well as by numbers.
+
 ## If something goes wrong
 
 The app shows a red box with what stopped and **what to do**. The common ones:

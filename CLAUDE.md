@@ -260,10 +260,17 @@ DXF R12 (Rhino/CAD) plus GeoJSON in `exchange/rhino/vNNN/plan/`, in local metres
 
 Coordinates are written to centimetres. On the real site the DXF is 4 MB, with 2,701 bench polylines (92.5 km), and an independent DXF reader opens it with no audit errors.
 
+### 09 — Quarry expansion (`09_expansion.py`)
+Uses Esri World Imagery Wayback. The config lives at `s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json`, and tiles come from `wayback.maptiles.arcgis.com` (both hosts are allowed in the "quarrymaker" cloud environment).
+1. Hash 5 sample tiles of the site in every release and group releases with identical tiles: one group is one distinct photo, dated by its first release.
+2. Download each photo at zoom 16 (up to `max_versions`, spread over time).
+3. Run `quarry_area` on each.
+4. Output, in `terrain/20_expansion/vNNN/`: area per date (JSON and CSV), the first-appearance growth map, GeoJSON outlines, `exchange/rhino/vNNN/plan/quarry_expansion.dxf` (one layer per date), and check images `09_*`.
+
 ---
 
 ## Orchestrator (`run_pipeline.py`)
-- `python run_pipeline.py` runs stages 0 to 8 in order.
+- `python run_pipeline.py` runs stages 0 to 9 in order.
 - `--from 03` and `--only 05` run part of the pipeline. `--auto` skips the pauses between stages.
 - Each stage is idempotent: it skips work when its outputs exist and the config hash hasn't changed.
 - Log everything to `logs/run_vNNN.log`.
@@ -293,9 +300,7 @@ The user is an architect, not a programmer, so every feature must be reachable f
   - The 30 m DEM (2011–2015) cannot confirm bench levels there.
   - The bench lines traced in the photo plus the cut sheet give the terraced look the user approved.
   - The user reports that the sun is in the southeast.
-- **Next, requested by the user:** compare the quarry area across imagery from several years, to measure expansion over time. Two possible sources:
-  - Esri World Imagery Wayback, which needs approval for its hosts;
-  - georeferenced GeoTIFFs supplied by the user.
+- **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
 - **Possible:** bench heights from shadow widths (this needs the sun elevation); strict "carve below DEM" mode; an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
 - **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with cut benches: 51% against 67% for the plain DEM (documented limit).
 

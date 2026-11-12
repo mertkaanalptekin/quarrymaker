@@ -45,7 +45,7 @@ BGIS_KEYS = {
 # out of the config hash so that moving machines does not start a new run.
 HASH_EXCLUDE = {("run_id",), ("blender", "path")}
 
-STAGES = ["00", "01", "02", "03", "04", "05", "06", "07", "08"]
+STAGES = ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09"]
 STAGE_SCRIPTS = {
     "00": "check_env.py",
     "01": "01_fetch_dem.py",
@@ -56,6 +56,7 @@ STAGE_SCRIPTS = {
     "06": "06_verify.py",
     "07": "07_terraces.py",
     "08": "08_linework.py",
+    "09": "09_expansion.py",
 }
 STAGE_TITLES = {
     "00": "Environment check",
@@ -67,6 +68,7 @@ STAGE_TITLES = {
     "06": "Verify",
     "07": "Interpret terraces",
     "08": "Plan linework",
+    "09": "Quarry expansion",
 }
 
 

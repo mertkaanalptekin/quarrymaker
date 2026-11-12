@@ -67,3 +67,8 @@ plan:                   # stage 08 - plan linework for Rhino/CAD (DXF + GeoJSON)
   bench_simplify_m: 0.5     # simplification tolerance for bench lines
   simplify_m: 2.0           # simplification tolerance for the other layers
   road_min_length_m: 80
+wayback:                # stage 09 - quarry expansion over time (Esri World Imagery Wayback, 2014 onwards)
+  enabled: true
+  zoom: 16                  # ~2 m photos, enough for outlines (17 = ~1 m, 4x more tiles)
+  max_versions: 10          # at most this many different photos, spread over time
+  min_area_ha: 5            # smallest quarry body kept on each photo
