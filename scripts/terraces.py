@@ -1076,7 +1076,7 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, fiel
     wy = np.ones((Hh, Ww))
     wx[:, -1] = 0.0
     wy[-1, :] = 0.0
-    lam = (res / 2000.0) ** 2
+    lam = (res / 300.0) ** 2                             # local consistency only (converges on any site size)
 
     def A(z):
         dxp = wx * (z - _shift(z, 0, -1))
