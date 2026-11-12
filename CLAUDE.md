@@ -240,10 +240,10 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - the mesh Z range and position match the raster.
 - **Test:** `tests/synthetic_quarry.py make|evaluate` builds quarries with known benches and measures the recovery. Results (share of the bench area within 3 m of the truth, plain DEM → stage 07):
   - `--scenario simple`, one pit: 65% → 89%, with H 11.84 m for a true 12 m.
-  - `--scenario complex` (carved style, default H 8 m):
-    - pit A (12 m benches): 67% → 84%;
-    - pit B (10 m benches on other levels, small, with walls only about three DEM cells wide): 67% → 49%;
-    - pit C (dug after the DEM): carved from the old ground, 4% → 15% (still too shallow).
+  - `--scenario complex` (carved style from photo lines, default H 9 m):
+    - pit A (12 m benches): 67% → 83%;
+    - pit B (10 m benches on other levels, small, with walls only about three DEM cells wide): 63% → 52%;
+    - pit C (dug after the DEM): 5% → 8% (still too shallow).
   - Negative control: imagery without benches (a grid pattern) → no measured zone is confirmed; in `method: auto` walls are still carved along the grid lines (illustrative mode); `method: measured` stops and asks.
   - With a known H, bench floors are within the DEM's vertical bias (~1 m).
 
@@ -301,7 +301,7 @@ The user is an architect, not a programmer, so every feature must be reachable f
   - The user reports that the sun is in the southeast.
 - **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
 - **Possible:** bench heights from shadow widths (this needs the sun elevation); an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
-- **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 8 m vs true 10 m): 49% against 67% for the plain DEM (documented limit).
+- **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 9 m vs true 10 m): 52% against 63% for the plain DEM (documented limit).
 - **Carved benches (latest):** the user found the DEM-drop steps too shallow, then found DEM-contour walls inconsistent with the photo. Stage 07 now lays out benches from the photo's lines (direction + spacing), full-height walls (9 m default), minimal fading (`bench_style: carved`).
 
 ## Out of scope for this task (later stages will use these outputs)
