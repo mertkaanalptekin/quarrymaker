@@ -65,6 +65,9 @@ HINTS = [
                                  "image under step 7. If you know the bench height, enter it in step 2. "
                                  "If the quarry was dug mostly after 2015, the height data is too old for "
                                  "this step: untick 'Calculate the benches'; your other results are complete."),
+    ("pit_mask not found", "The traced quarry outline file is missing (it stays in the old folder when you "
+                           "download a new version). Copy data/reference/pit_outline.geojson from the old "
+                           "folder, or trace the outline again in step 1."),
     ("No quarry pit was found", "Trace the pit outline on the map (step 1, 'Trace pit outline') and save."),
     ("API key looks invalid", "Your OpenTopography key was refused. Check it and enter it again in step 2."),
     ("too large", "The area is too large. Draw a smaller rectangle around the quarry."),

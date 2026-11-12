@@ -184,6 +184,9 @@ earlier. Photos differ in season and colour, so compare outlines by eye as well 
 
 ## If something goes wrong
 
+**Updating to a new version:** copy `config.yaml` and the whole `data/reference/` folder (it holds
+your traced outline, `pit_outline.geojson`) from the old folder into the new one.
+
 The app shows a red box with what stopped and **what to do**. The common ones:
 
 | Message | What to do |

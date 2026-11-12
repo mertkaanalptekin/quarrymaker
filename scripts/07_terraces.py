@@ -181,9 +181,18 @@ def main(argv=None) -> int:
     to_crs = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     aoi_poly = shapely.transform(box(aoi["west"], aoi["south"], aoi["east"], aoi["north"]),
                                  lambda c: np.c_[to_crs.transform(c[:, 0], c[:, 1])])
-    if tc["pit_mask"]:
-        mask, polys = load_user_mask(tc["pit_mask"], cfg, tf, (H, W))
-        mask_info = {"source": f"user polygon {tc['pit_mask']}", "area_m2": float(mask.sum() * res * res)}
+    user_mask = tc["pit_mask"]
+    if user_mask:
+        um = Path(user_mask) if Path(user_mask).is_absolute() else Path(cfg["_root"]) / user_mask
+        if not um.exists():
+            # e.g. config.yaml copied to a new folder without the traced outline file
+            log.warning("The traced quarry outline %s was not found (was it left in the old folder?). "
+                        "Using the automatic quarry area instead. To use your outline, copy "
+                        "pit_outline.geojson into data/reference/ or trace it again in the app.", um)
+            user_mask = None
+    if user_mask:
+        mask, polys = load_user_mask(user_mask, cfg, tf, (H, W))
+        mask_info = {"source": f"user polygon {user_mask}", "area_m2": float(mask.sum() * res * res)}
     else:
         mask, polys, mask_info = T.quarry_area(rgb, z0, res, tf, keep_polygon=aoi_poly,
                                                min_area_ha=float(tc["quarry_min_area_ha"]))
