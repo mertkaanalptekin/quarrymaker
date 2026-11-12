@@ -64,7 +64,8 @@ DEFAULTS = {
     "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
     "bench_style": "carved",        # carved = fixed-height walls, flat floors | dem_steps = steps as tall as the DEM drop
     "carve_bench_height_m": 9.0,    # wall height for carved benches when bench_height_m is auto
-    "wall_angle_deg": 80.0,         # carved walls (marble quarries: near vertical)
+    "wall_angle_deg": 85.0,         # carved walls (marble quarries: near vertical)
+    "block_cell_m": 8.0,            # blocky benches: straight walls, right-angle corners (0 = smooth curves)
 }
 
 CLASS_NAMES = {0: "outside", 1: "pit floor", 2: "bench", 3: "face", 4: "water",
@@ -400,7 +401,8 @@ def main(argv=None) -> int:
             log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
             Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
             dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
-                                          face_angle_deg=float(tc["wall_angle_deg"]))
+                                          face_angle_deg=float(tc["wall_angle_deg"]),
+                                          cell_m=float(tc.get("block_cell_m", 8.0)))
             linfo["bench_height_source"] = "your value" if fixed_h is not None else "default guess (carve_bench_height_m)"
             if linfo:
                 log.info("Carved benches: %s m walls, bench spacing in the photo %s m, %.1f%% of the bench "

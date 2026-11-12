@@ -964,9 +964,10 @@ def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_d
     return float(np.median(h)), int(h.size)
 
 
-def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, field_m=30.0,
-                  reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5):
+def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, field_m=20.0,
+                  reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=120.0,
+                  feather_m=20.0, carve=0.5, blocky=True, block_m=150.0, flat_floors=True, flat_m=25.0,
+                  cell_m=8.0):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
     1. At each line pixel: the bench direction (structure tensor of the
@@ -982,6 +983,13 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, fiel
        face_angle_deg, laid on the DEM smoothed at base_m; the whole system is
        lowered carve*H (carved into the ground). Every wall is a full bench
        high; where the photo's benches end, the walls end.
+    blocky: marble benches are cut as straight faces meeting at right angles
+    (the zigzag rows in the photo). The bench directions are snapped to the
+    two perpendicular directions that dominate the lines within block_m;
+    the ground is divided into square cells of cell_m aligned with them and
+    each cell takes one bench level, so walls run straight along cell edges
+    and turn at right angles (cell_m = 0: smooth walls). Floors are then
+    flattened within their own level (local average over flat_m).
     Returns (dz, info)."""
     H = float(bench_h)
     rows = np.where(within.any(1))[0]
@@ -1001,8 +1009,21 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, fiel
     # 1. direction (doubled-angle tensor), downhill sign, spacing
     s = sk.astype(float)
     gy, gx = np.gradient(gauss(s, 1.0))
-    jxx, jyy, jxy = gauss(gx * gx, 2.0), gauss(gy * gy, 2.0), gauss(gx * gy, 2.0)
+    tsig = 1.0 if blocky else 2.0
+    jxx, jyy, jxy = gauss(gx * gx, tsig), gauss(gy * gy, tsig), gauss(gx * gy, tsig)
     ang = 0.5 * np.arctan2(2 * jxy, jxx - jyy)
+    if blocky:
+        # dominant perpendicular pair of directions (4-fold angle average)
+        wl0 = sk.astype(float)
+        sb = block_m / 2 / res
+        c4, s4 = gauss(wl0 * np.cos(4 * ang), sb), gauss(wl0 * np.sin(4 * ang), sb)
+        coh4 = np.hypot(c4, s4) / np.maximum(gauss(wl0, sb), 1e-9)
+        th_d = 0.25 * np.arctan2(s4, c4)
+
+        def snap_ang(a):
+            k = np.round((a - th_d) / (np.pi / 2))
+            return np.where(coh4 > 0.25, th_d + k * np.pi / 2, a)
+        ang = snap_ang(ang)
     nx, ny = np.cos(ang), np.sin(ang)
     zs = gauss(zc, dir_m / 2 / res)
     dzy, dzx = np.gradient(zs, res)
@@ -1037,6 +1058,8 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, fiel
     freq = np.where(gauss(wq, sig) > 1e-4, freq, 1.0 / sp_med)
     freq = gauss(freq, sig)
     angf = 0.5 * np.arctan2(s2, c2)
+    if blocky:
+        angf = snap_ang(angf)
     fx, fy = np.cos(angf), np.sin(angf)
     sgf = -np.sign(fx * dzx + fy * dzy)
     sgf[sgf == 0] = 1.0
@@ -1087,17 +1110,57 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=80.0, fiel
     half = phi / 2
     st = np.where(rfr < -half, n - 0.5, np.where(rfr >= half, n + 0.5, n - 0.5 + (rfr + half) / phi))
     zt = zb + H * (st - u) - carve * H
+    if cell_m > 0 and blocky:
+        # square cells aligned with the local bench directions; one level per cell
+        yy, xx = np.mgrid[0:Hh, 0:Ww].astype(float) * res
+        th = np.where(coh4 > 0.25, th_d, 0.0)
+        th = 0.25 * np.arctan2(gauss(np.sin(4 * th), 40 / res), gauss(np.cos(4 * th), 40 / res))
+        a = xx * np.cos(th) + yy * np.sin(th)
+        bq = -xx * np.sin(th) + yy * np.cos(th)
+        ia = np.floor(a / cell_m).astype(np.int64)
+        ib = np.floor(bq / cell_m).astype(np.int64)
+        tq = np.round(th / (np.pi / 36)).astype(np.int64)        # 5 deg classes keep cells consistent
+        key = (tq * 100003 + ia) * 100003 + ib
+        uk, inv = np.unique(key.ravel(), return_inverse=True)
+        cnt = np.bincount(inv)
+        uc = (np.bincount(inv, weights=u.ravel()) / cnt)[inv].reshape(u.shape)
+        zbc = (np.bincount(inv, weights=(zb - H * u).ravel()) / cnt)[inv].reshape(u.shape)
+        blk = pres > 0.5
+        stc = np.floor(uc) + 0.5
+        zt = np.where(blk, zbc + H * stc - carve * H, zt)
+        rfr = np.where(blk, 1.0, rfr)                    # all cells are floor pieces
+        half = np.where(blk, 0.0, half)
+        n = np.where(blk, np.floor(uc) + 1, n)
+    if flat_floors:
+        # floors flattened within their own level (local average, no jumps across walls)
+        fl = (np.abs(rfr) >= half) & (pres > 0.5) & wc
+        lvl = np.where(rfr >= half, n, n - 1)              # floor between walls lvl and lvl+1
+        for v in np.unique(lvl[fl]):
+            m = fl & (lvl == v)
+            rows_ = np.where(m.any(1))[0]
+            cols_ = np.where(m.any(0))[0]
+            pd_ = int(flat_m / res)
+            sub = (slice(max(0, rows_[0] - pd_), rows_[-1] + 1 + pd_), slice(max(0, cols_[0] - pd_), cols_[-1] + 1 + pd_))
+            ms = m[sub].astype(float)
+            vals = zt[sub]
+            num = gauss(vals * ms, flat_m / 2 / res)
+            den = gauss(ms, flat_m / 2 / res)
+            zt[sub] = np.where(ms > 0, num / np.maximum(den, 1e-9), vals)
     # where the photo shows no benches keep the measured ground (smooth hand-over)
     zt = pres * zt + (1 - pres) * (zc - carve * H * pres)
     fe = gauss(wc.astype(float), feather_m / 2 / res) * wc
     fe = np.clip((fe - 0.5) * 2.0, 0, 1)
+    zt = np.minimum(zt, zc + 0.5 * H)                     # never build up more than half a bench
     dz = fe * (zt - zc)
     out = np.zeros(z0.shape, "float32")
     out[sl] = dz
-    face = (np.abs(rfr) < half) & (pres > 0.5) & wc
-    on_wall = float((face & sk).sum()) / max(1, int(sk.sum()))
+    step = np.zeros(zt.shape, bool)
+    for dy, dx in ((0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, -1)):
+        step |= np.abs(_shift(zt, dy, dx, np.nan) - zt) > 0.5 * H
+    near_wall = box_blur(step.astype(float), max(1, int(round(4.0 / res)))) > 0
+    on_wall = float((near_wall & sk & (pres > 0.5)).sum()) / max(1, int((sk & (pres > 0.5)).sum()))
     info = {"bench_height_m": round(H, 2), "line_length_km": round(float(sk.sum()) * res / 1000.0, 1),
-            "bench_spacing_median_m": round(sp_med, 1), "lines_on_walls_pct": round(100 * on_wall, 1),
+            "bench_spacing_median_m": round(sp_med, 1), "lines_on_walls_pct": round(100 * on_wall, 1), "cell_m": cell_m,
             "benched_area_ha": round(float(((pres > 0.5) & wc).sum()) * res * res / 1e4, 1),
             "mean_dz_m": round(float(dz[wc].mean()), 2), "max_cut_m": round(float(-dz.min()), 1),
             "max_fill_m": round(float(dz.max()), 1)}
