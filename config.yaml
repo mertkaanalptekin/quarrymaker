@@ -72,3 +72,5 @@ wayback:                # stage 09 - quarry expansion over time (Esri World Imag
   zoom: 16                  # ~2 m photos, enough for outlines (17 = ~1 m, 4x more tiles)
   max_versions: 10          # at most this many different photos, spread over time
   min_area_ha: 5            # smallest quarry body kept on each photo
+  min_match: 0.45           # photos whose structure matches the newest one less than this are left out
+  persistence: 0.6          # a spot counts as quarried when it is quarry on this share of later photos

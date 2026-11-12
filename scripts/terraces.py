@@ -746,7 +746,7 @@ def benched_surface(z0, lines, res, ell_m=30.0, cut=0.0, iters=600, tol=1e-4):
 
 
 def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, open_m=12.0,
-                close_m=25.0, max_hole_ha=8.0, min_relief_m=5.0):
+                close_m=25.0, max_hole_ha=8.0, min_relief_m=5.0, threshold=None):
     """The whole quarry area (pits, dumps, internal roads, yards), separated
     from farmland, villages, greenhouses and factories.
 
@@ -764,7 +764,8 @@ def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, ope
     zs = gauss(z0, 10 / res)
     slope = overall_slope_deg(zs, res)
     cand, _, info = detect_pit(rgb, slope, z0, transform, res, min_area_m2=0.0, min_relief_m=0.0,
-                               min_mean_slope_deg=0.0, keep_polygon=None)
+                               min_mean_slope_deg=0.0, keep_polygon=None, threshold=threshold)
+    thr_used = info["threshold"]
     ro = max(1, int(round(open_m / res)))
     opened = box_blur(box_blur(cand.astype(float), ro) > 0.999, ro) > 0.001
     labels, polys = label_components(opened, transform)
@@ -795,7 +796,7 @@ def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, ope
     if filled:
         mask = features.rasterize(((p, 1) for p in filled), out_shape=cand.shape, transform=transform,
                                   dtype="uint8").astype(bool)
-    return mask, filled, {"area_m2": float(mask.sum() * res * res), "bodies": len(filled),
+    return mask, filled, {"area_m2": float(mask.sum() * res * res), "bodies": len(filled), "threshold": thr_used,
                           "source": "quarry area: bare rock + relief, roads cut, large bodies only"}
 
 
