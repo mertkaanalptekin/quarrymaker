@@ -139,9 +139,7 @@ measured ground is kept. The image `07_bench_lines.png` shows the traced lines i
 
 - **Wall height:** your bench height from step 2. If you leave it on "calculate", a **9 m guess** is
   used (the photo can't measure heights; 8–10 m is plausible for this kind of quarry).
-- **Blocky shape:** marble benches are cut as straight faces meeting at right angles, so the walls
-  are built from 8 m blocks aligned with the benches' main directions (`block_cell_m` in
-  `config.yaml`; set 0 for smooth, curved walls that sit closer to the traced lines).
+- **Flat floors:** each bench floor is levelled into a flat plate (`flat_floor_m` in `config.yaml`).
 - **Wall steepness:** 85° by default (`wall_angle_deg` in `config.yaml`).
 - **Older look:** to make steps only as tall as the elevation data's drop, set
   `bench_style: dem_steps` in `config.yaml`.

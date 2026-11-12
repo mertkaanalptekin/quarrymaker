@@ -65,7 +65,7 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
                             #          floors (marble quarries) | dem_steps = steps only as tall as the DEM drop
   carve_bench_height_m: 9   # wall height used by carved benches when bench_height_m is auto (a guess, 8-10 m plausible)
   wall_angle_deg: 85        # steepness of the carved walls (90 = vertical)
-  block_cell_m: 8           # blocky benches: straight walls with right-angle corners, cells this size (0 = smooth curves)
+  flat_floor_m: 30          # bench floors levelled over this distance (flat plates between walls; 0 = off)
 plan:                   # stage 08 - plan linework for Rhino/CAD (DXF + GeoJSON)
   enabled: true
   bench_lines_3d: true      # bench lines at their elevation (use ProjectToCPlane in Rhino for a flat plan)
