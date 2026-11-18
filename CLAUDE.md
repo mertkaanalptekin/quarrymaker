@@ -231,6 +231,7 @@ Calculates the quarry's benches from the satellite image with the help of the DE
     - Area B: 117k faces against 250k for the grid.
     - `mesh_max_vertices` is now 8 M, so the real site is meshed at full 2 m. The old 3 M cap halved the resolution to 4 m and smeared the walls.
     - The Z-range check allows `mesh_wall_m`, because block corners are averages.
+    - Diagonal walls are straightened: wall corners slide toward the mean of their neighbouring wall corners (6 iterations, at most 0.7 cell), and all vertices at a corner move together, so walls stay vertical but no longer step 2 m in plan.
   - **Floors and walls:** floors are flat plates per level (`flat_floor_m` 30 m); walls are 85°. H is `bench_height_m`, else `carve_bench_height_m` = 7 m, the typical Denizli bench (6–8 m; docs/KOCABAS_SITE_RESEARCH.md).
   - **Objective check (`07_shadow_check.png`, `photo_agreement` in params):** the model is rendered with the photo's sun (cast shadows plus faces turned away) and compared with the photo's wall bands. Measures: precision, recall, F1, ±1 cell.
   - **Tuning results (1 km test areas, reference = zoom-18 bands):**

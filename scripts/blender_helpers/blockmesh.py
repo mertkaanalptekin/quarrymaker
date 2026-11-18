@@ -22,7 +22,7 @@ import numpy as np
 # slots of the four cells around a corner: 0 NW, 1 NE, 2 SW, 3 SE
 
 
-def build(z, x0: float, y0: float, res: float, wall_m: float = 2.5):
+def build(z, x0: float, y0: float, res: float, wall_m: float = 2.5, smooth_iter: int = 6):
     z = np.asarray(z, dtype="float64")
     h, w = z.shape
     zp = np.pad(z, 1, mode="edge")
@@ -44,12 +44,16 @@ def build(z, x0: float, y0: float, res: float, wall_m: float = 2.5):
     offset = (np.cumsum(ngroups.ravel()) - ngroups.ravel()).reshape(ngroups.shape)
     nv = int(ngroups.sum())
     rr, cc = np.mgrid[0:h + 1, 0:w + 1]
+    cx = (x0 + cc * res).astype("float64")
+    cy = (y0 - rr * res).astype("float64")
+    if smooth_iter > 0:
+        cx, cy = _straighten_walls(cx, cy, ngroups > 1, res, smooth_iter)
     co = np.zeros((nv, 3))
     for g in range(4):
         m = ngroups > g
         vid = offset[m] + g
-        co[vid, 0] = x0 + cc[m] * res
-        co[vid, 1] = y0 - rr[m] * res
+        co[vid, 0] = cx[m]
+        co[vid, 1] = cy[m]
         co[vid, 2] = zg[..., g][m]
 
     def vid(r, c, slot):
@@ -86,6 +90,43 @@ def build(z, x0: float, y0: float, res: float, wall_m: float = 2.5):
     return {"co": co, "loops": loops.astype("int64"), "starts": starts.astype("int64"),
             "totals": totals.astype("int64"), "cell": np.concatenate([qcell, tcell]).astype("int64"),
             "is_wall": is_wall}
+
+
+def _straighten_walls(cx, cy, wall, res, iters, lam=0.5, max_shift=0.7):
+    """Slide the corners that lie on walls toward the mean of their neighbouring
+    wall corners, so walls that run diagonally across the grid become straight
+    instead of 2 m staircases in plan. All vertices at a corner move together,
+    so walls stay vertical. Wall ends (one wall neighbour) stay put; shifts are
+    capped at max_shift * res so tiles never fold."""
+    x0, y0 = cx.copy(), cy.copy()
+    wf = wall.astype("float64")
+    for _ in range(iters):
+        sx = np.zeros_like(cx)
+        sy = np.zeros_like(cy)
+        n = np.zeros_like(cx)
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)):
+            nb = np.roll(np.roll(wf, -dr, 0), -dc, 1)
+            # no wrap-around at the grid border
+            if dr == 1:
+                nb[-1, :] = 0
+            if dr == -1:
+                nb[0, :] = 0
+            if dc == 1:
+                nb[:, -1] = 0
+            if dc == -1:
+                nb[:, 0] = 0
+            sx += nb * np.roll(np.roll(cx, -dr, 0), -dc, 1)
+            sy += nb * np.roll(np.roll(cy, -dr, 0), -dc, 1)
+            n += nb
+        move = wall & (n >= 2)
+        ax = np.where(n > 0, sx / np.maximum(n, 1), cx)
+        ay = np.where(n > 0, sy / np.maximum(n, 1), cy)
+        cx = np.where(move, cx + lam * (ax - cx), cx)
+        cy = np.where(move, cy + lam * (ay - cy), cy)
+    lim = max_shift * res
+    cx = x0 + np.clip(cx - x0, -lim, lim)
+    cy = y0 + np.clip(cy - y0, -lim, lim)
+    return cx, cy
 
 
 def _walls(p1, p2, p3, p4, cell, faces, cells, tris, tri_cells):
