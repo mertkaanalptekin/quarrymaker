@@ -966,8 +966,15 @@ def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_d
 
 def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, field_m=30.0,
                   reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5, flat_m=30.0):
+                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
+
+    band / sun_az: dark wall bands (walls facing away from the sun, with their
+    shadows) and the sun azimuth. On these walls the lower side is the side
+    away from the sun: the step direction comes from the photo, not from the
+    old DEM. relief_m: relief at scales shorter than this comes from counting
+    benches (H per bench); the DEM only gives the shape at longer scales
+    (0 = the bench system is squeezed into the DEM's relief, older behaviour).
 
     1. At each line pixel: the bench direction (structure tensor of the
        lines), the downhill side (DEM smoothed at dir_m) and the spacing to
@@ -1010,6 +1017,12 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, fiel
     dzy, dzx = np.gradient(zs, res)
     sg = -np.sign(nx * dzx + ny * dzy)
     sg[sg == 0] = 1.0
+    if band is not None and sun_az is not None:
+        # walls in shade: the lower floor is on the side away from the sun
+        bnd = box_blur(band[sl].astype(float), 1) > 0
+        sun_c, sun_r = math.sin(math.radians(sun_az)), -math.cos(math.radians(sun_az))
+        sg_sun = -np.sign(nx * sun_c + ny * sun_r)
+        sg = np.where(bnd & (sg_sun != 0), sg_sun, sg)
     nx, ny = nx * sg, ny * sg                         # downhill normal
     rr, cc = np.nonzero(sk)
     gap = np.full(rr.size, np.nan)
@@ -1042,6 +1055,11 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, fiel
     fx, fy = np.cos(angf), np.sin(angf)
     sgf = -np.sign(fx * dzx + fy * dzy)
     sgf[sgf == 0] = 1.0
+    # signed direction from the lines themselves (sun-signed walls, else DEM-signed)
+    vx, vy = gauss(wl * nx, sig), gauss(wl * ny, sig)
+    vn = np.hypot(vx, vy) / np.maximum(gauss(wl, sig), 1e-9)
+    sgv = np.sign(fx * vx + fy * vy)
+    sgf = np.where((vn > 0.3) & (sgv != 0), sgv, sgf)
     fx, fy = fx * sgf, fy * sgf
     # presence: 1 near lines, fading to 0 beyond reach_m
     near = gauss(wl, reach_m / 2 / res)
@@ -1088,7 +1106,14 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, fiel
     rfr = u - n
     half = phi / 2
     st = np.where(rfr < -half, n - 0.5, np.where(rfr >= half, n + 0.5, n - 0.5 + (rfr + half) / phi))
-    zt = zb + H * (st - u) - carve * H
+    if relief_m > 0:
+        # short-range relief from counting benches, long-range shape from the DEM
+        zt = gauss(zc - H * u, relief_m / 2 / res) + H * st - carve * H
+        # where that rises above the ground, lower it locally (carved, not built up)
+        up = gauss(np.clip(zt - zc, 0, None), 15.0 / res)
+        zt = zt - up
+    else:
+        zt = zb + H * (st - u) - carve * H
     if flat_m > 0:
         # flat floors: each floor (between two walls) levelled within flat_m, per level
         fl = ~((np.abs(rfr) < half)) & (pres > 0.5) & wc

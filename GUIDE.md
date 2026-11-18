@@ -75,7 +75,7 @@ for your location (metres).
 - **OpenTopography key.** Paste your key and press **Use this key**. For safety the key is only kept
   while the app is open; it is never saved. You paste it again next time.
 - **Bench height.** Quarry walls are cut as giant steps; the bench height is how tall one step is
-  (usually 6–15 m). Step 7 carves every wall at this height; without a value it uses a 9 m guess.
+  (usually 6–8 m in the Denizli travertine quarries). Step 7 carves every wall at this height; without a value it uses 7 m.
   - **If you don't know it,** leave "calculate it from the image" selected.
   - **If you can find it,** the bench levels become more accurate. Ask the quarry operator, look in
     the permit documents, or measure it in Google Earth Pro: hover over one bench floor and then
@@ -137,8 +137,8 @@ near-vertical walls that run along those lines. Every wall is one full bench hig
 length; where the benches in the photo end, the walls end. Where the photo shows no benches, the
 measured ground is kept. The image `07_bench_lines.png` shows the traced lines in red.
 
-- **Wall height:** your bench height from step 2. If you leave it on "calculate", a **9 m guess** is
-  used (the photo can't measure heights; 8–10 m is plausible for this kind of quarry).
+- **Wall height:** your bench height from step 2. If you leave it on "calculate", **7 m** is
+  used, the typical bench height in the Denizli travertine quarries (6–8 m; see `docs/KOCABAS_SITE_RESEARCH.md`).
 - **Flat floors:** each bench floor is levelled into a flat plate (`flat_floor_m` in `config.yaml`).
 - **Wall steepness:** 85° by default (`wall_angle_deg` in `config.yaml`).
 - **Older look:** to make steps only as tall as the elevation data's drop, set

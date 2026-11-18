@@ -63,7 +63,7 @@ DEFAULTS = {
     "max_cut_m": 12.0,              # largest change allowed by the cut benches
     "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
     "bench_style": "carved",        # carved = fixed-height walls, flat floors | dem_steps = steps as tall as the DEM drop
-    "carve_bench_height_m": 9.0,    # wall height for carved benches when bench_height_m is auto
+    "carve_bench_height_m": 7.0,    # wall height when bench_height_m is auto (Denizli quarries: usually 6-8 m)
     "wall_angle_deg": 85.0,         # carved walls (marble quarries: near vertical)
     "flat_floor_m": 30.0,           # floors levelled over this distance within their bench level (0 = off)
 }
@@ -403,7 +403,7 @@ def main(argv=None) -> int:
             dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
                                           face_angle_deg=float(tc["wall_angle_deg"]),
                                           flat_m=float(tc.get("flat_floor_m", 30.0)))
-            linfo["bench_height_source"] = "your value" if fixed_h is not None else "default guess (carve_bench_height_m)"
+            linfo["bench_height_source"] = "your value" if fixed_h is not None else "typical Denizli travertine bench, 6-8 m in the published sources (carve_bench_height_m)"
             if linfo:
                 log.info("Carved benches: %s m walls, bench spacing in the photo %s m, %.1f%% of the bench "
                          "lines on a wall, mean change %s m", linfo.get("bench_height_m"),
