@@ -226,6 +226,11 @@ Calculates the quarry's benches from the satellite image with the help of the DE
     - the signed normals spread directly (sun-signed on bands).
   - **Bench number u:** screened Poisson (300 m) with ∇u = −(downhill normal)/spacing, snapped to integers on the lines (weight 100, 10 m).
   - **Relief split:** relief at scales < 300 m comes from counting benches (H each); the DEM gives only the longer-scale shape (`relief_m`). Parts that would rise above the ground are lowered locally (carved).
+  - **Carving correction:** ground that the bench steps would raise above the measured surface is lowered by a correction smoothed over `carve_smooth_m` (150 m). A 15 m correction made lumpy dents on the real site.
+  - **Block mesh (`mesh_style: blocks`, `blender_helpers/blockmesh.py`):** the Blender mesh is built from flat 2 m tiles, with a truly vertical face wherever neighbouring cells differ by more than `mesh_wall_m` (2.5 m). Gentle ground shares vertices and stays smooth. Coplanar tiles are merged (limited dissolve, 1°), and attributes are per face.
+    - Area B: 117k faces against 250k for the grid.
+    - `mesh_max_vertices` is now 8 M, so the real site is meshed at full 2 m. The old 3 M cap halved the resolution to 4 m and smeared the walls.
+    - The Z-range check allows `mesh_wall_m`, because block corners are averages.
   - **Floors and walls:** floors are flat plates per level (`flat_floor_m` 30 m); walls are 85°. H is `bench_height_m`, else `carve_bench_height_m` = 7 m, the typical Denizli bench (6–8 m; docs/KOCABAS_SITE_RESEARCH.md).
   - **Objective check (`07_shadow_check.png`, `photo_agreement` in params):** the model is rendered with the photo's sun (cast shadows plus faces turned away) and compared with the photo's wall bands. Measures: precision, recall, F1, ±1 cell.
   - **Tuning results (1 km test areas, reference = zoom-18 bands):**

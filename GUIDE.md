@@ -110,6 +110,12 @@ Press **Open in Blender** or **Open folder**.
 
 **Blender**
 - Open the file. The scene is in metres at true scale.
+- **To see the benches clearly:**
+  1. Switch the viewport to **Solid** shading.
+  2. In the shading menu, turn on **Cavity** and **Shadow**.
+
+  The photo texture hides relief. The bench floors are flat faces and the walls are truly vertical
+  faces (`mesh_style: blocks` in `config.yaml`; `smooth` gives the older height-grid surface).
 - The scene carries BlenderGIS georeferencing, so BlenderGIS basemaps and imports land in the
   right place.
 - In the benches file, select `TERRAIN_terraced` and switch its material to
