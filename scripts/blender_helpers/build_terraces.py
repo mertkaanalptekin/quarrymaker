@@ -1,7 +1,8 @@
 """Runs inside Blender for stage 07. Builds quarry_terraced.blend:
 
-  10_terraces/TERRAIN_terraced     interpreted fine mesh over the pit (+margin),
-                                   point attributes confidence / terrace_class / dz_interp
+  10_terraces/TERRAIN_terraced     interpreted mesh over the pit (+margin): flat tiles with
+                                   vertical walls (mesh_style blocks) or a smooth grid;
+                                   attributes confidence / terrace_class / dz_interp
   10_terraces/PIT_outline          pit boundary curve(s)
   00_base_context/TERRAIN_base_context   measured 30 m terrain with a hole under the patch
   00_base_context/ORIGIN_marker
@@ -125,15 +126,25 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     mat_cls.use_fake_user = True
 
     # --- interpreted patch ---
-    me = bl.grid_mesh("TERRAIN_terraced", z, xs, ys, ext, origin)
-    bl.add_point_attribute(me, "confidence", data["confidence"])
-    bl.add_point_attribute(me, "terrace_class", data["classes"], "INT")
-    bl.add_point_attribute(me, "terrace_class_f", data["classes"].astype("float32") / 5.0)
-    bl.add_point_attribute(me, "dz_interp", data["dz"])
+    style = str(prm.get("settings", {}).get("mesh_style", "blocks")).lower()
+    if style == "blocks":
+        # flat tiles with truly vertical walls where neighbours differ by more than wall_m
+        wall_m = float(prm.get("settings", {}).get("mesh_wall_m", 2.5))
+        me, fc = bl.block_mesh("TERRAIN_terraced", z, xs, ys, ext, origin, wall_m=wall_m)
+        attr = lambda n, v, k="FLOAT": bl.add_face_attribute(me, n, v, fc, k)  # noqa: E731
+        log.info("Block mesh: %d vertices, %d faces (walls > %.1f m are vertical)",
+                 len(me.vertices), len(me.polygons), wall_m)
+    else:
+        me = bl.grid_mesh("TERRAIN_terraced", z, xs, ys, ext, origin)
+        attr = lambda n, v, k="FLOAT": bl.add_point_attribute(me, n, v, k)  # noqa: E731
+    attr("confidence", data["confidence"])
+    attr("terrace_class", data["classes"], "INT")
+    attr("terrace_class_f", data["classes"].astype("float32") / 5.0)
+    attr("dz_interp", data["dz"])
     if "method" in data.files:
         # 0 none, 1 benches confirmed by elevation data, 2 traced from the photo (illustrative)
-        bl.add_point_attribute(me, "bench_method", data["method"], "INT")
-        bl.add_point_attribute(me, "bench_method_f", data["method"].astype("float32") / 2.0)
+        attr("bench_method", data["method"], "INT")
+        attr("bench_method_f", data["method"].astype("float32") / 2.0)
     me.materials.append(mat)
     coll = bpy.data.collections.new("10_terraces")
     bpy.context.scene.collection.children.link(coll)

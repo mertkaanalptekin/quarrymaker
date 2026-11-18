@@ -50,7 +50,9 @@ DEFAULTS = {
     "pit_min_local_relief_m": 3.0,
     "feather_m": 8.0,
     "margin_m": 150.0,              # mesh extent = pit bbox + margin
-    "mesh_max_vertices": 3000000,
+    "mesh_style": "blocks",          # blocks = flat tiles + truly vertical walls | smooth = height grid
+    "mesh_wall_m": 2.5,             # neighbouring cells further apart than this get a vertical wall
+    "mesh_max_vertices": 8000000,  # full 2 m detail on a ~3 x 4 km quarry (7.1 M on the real site)
     "require_significant": True,    # stop (ask) when no region shows a bench pattern
     "region_size_m": 400.0,         # benches are tested region by region (50% overlap)
     "min_significance": 2.0,        # region evidence must beat shifted edge maps by this factor
@@ -682,7 +684,13 @@ def main(argv=None) -> int:
                    f"SRID={g.get('SRID')}, crs x={g.get('crs x')}, crs y={g.get('crs y')}"))
     pz = np.load(patch)["z"]
     dzr = max(abs(br["patch_bbox"][2] - float(pz.min())), abs(br["patch_bbox"][5] - float(pz.max())))
-    checks.append(("Terraced mesh Z range equals interpreted raster", dzr <= 0.01, f"max diff {dzr:.4f} m"))
+    if str(tc.get("mesh_style", "blocks")).lower() == "blocks":
+        # block mesh corners are averages of the cells that meet there (within mesh_wall_m)
+        tol_z = float(tc.get("mesh_wall_m", 2.5))
+        checks.append(("Terraced block mesh Z range matches the interpreted raster (corner averaging)",
+                       dzr <= tol_z, f"max diff {dzr:.3f} m (tolerance {tol_z:g} m)"))
+    else:
+        checks.append(("Terraced mesh Z range equals interpreted raster", dzr <= 0.01, f"max diff {dzr:.4f} m"))
     pb = params["patch"]
     half = res * stride / 2 + 1e-3
     exp = [pb["xmin"] - ox + half, pb["ymin"] - oy + half, pb["xmax"] - ox - half, pb["ymax"] - oy - half]

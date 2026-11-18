@@ -62,6 +62,71 @@ def grid_mesh(name, z, xs_abs, ys_abs, ext, origin, face_mask=None):
     return me
 
 
+def block_mesh(name, z, xs_abs, ys_abs, ext, origin, wall_m=2.5, flat_deg=1.0):
+    """Terrain mesh with truly vertical walls (see blockmesh.py): one flat-ish
+    tile per grid sample, vertical faces where neighbours differ by > wall_m.
+    Coplanar tiles are then merged (limited dissolve), so flat bench floors
+    become single faces. Returns (mesh, face_cell) where face_cell[i] is the
+    grid cell (row * w + col) of face i, for per-face attributes."""
+    import bmesh
+
+    import blockmesh
+    res = float(abs(xs_abs[1] - xs_abs[0])) if len(xs_abs) > 1 else 1.0
+    x0 = float(xs_abs[0]) - res / 2 - origin[0]
+    y0 = float(ys_abs[0]) + res / 2 - origin[1]
+    m = blockmesh.build(z, x0, y0, res, wall_m)
+    nv, nf = len(m["co"]), len(m["totals"])
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(nv)
+    me.vertices.foreach_set("co", m["co"].reshape(-1).astype("float32"))
+    me.loops.add(len(m["loops"]))
+    me.loops.foreach_set("vertex_index", m["loops"].astype("int32"))
+    me.polygons.add(nf)
+    me.polygons.foreach_set("loop_start", m["starts"].astype("int32"))
+    try:
+        me.polygons.foreach_set("loop_total", m["totals"].astype("int32"))
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+    me.update(calc_edges=True)
+    me.validate(verbose=False)
+    # cell index as a face attribute survives the dissolve (faces keep one of their cells)
+    a = me.attributes.new(name="_cell", type="INT", domain="FACE")
+    a.data.foreach_set("value", m["cell"].astype("int32"))
+    w_ = me.attributes.new(name="is_wall", type="BOOLEAN", domain="FACE")
+    w_.data.foreach_set("value", m["is_wall"])
+    if flat_deg and flat_deg > 0:
+        import math
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(flat_deg), use_dissolve_boundaries=False,
+                                 verts=bm.verts, edges=bm.edges, delimit={"NORMAL"})
+        bm.to_mesh(me)
+        bm.free()
+        me.update()
+    # UVs from vertex XY (the ortho covers exactly ext)
+    nl = len(me.loops)
+    vi = np.zeros(nl, dtype="int32")
+    me.loops.foreach_get("vertex_index", vi)
+    co = np.zeros(len(me.vertices) * 3, dtype="float32")
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    U = (co[vi, 0] + origin[0] - ext["xmin"]) / (ext["xmax"] - ext["xmin"])
+    V = (co[vi, 1] + origin[1] - ext["ymin"]) / (ext["ymax"] - ext["ymin"])
+    uv = me.uv_layers.new(name="UVMap")
+    uv.data.foreach_set("uv", np.stack([U, V], -1).reshape(-1).astype("float32"))
+    fc = np.zeros(len(me.polygons), dtype="int32")
+    me.attributes["_cell"].data.foreach_get("value", fc)
+    me.polygons.foreach_set("use_smooth", np.zeros(len(me.polygons), dtype=bool))   # flat shading: crisp edges
+    return me, fc
+
+
+def add_face_attribute(me, name, values_per_cell, face_cell, kind="FLOAT"):
+    v = np.asarray(values_per_cell).reshape(-1)[face_cell]
+    a = me.attributes.new(name=name, type=kind, domain="FACE")
+    a.data.foreach_set("value", v.astype("int32" if kind == "INT" else "float32"))
+    return a
+
+
 def add_point_attribute(me, name, values, kind="FLOAT"):
     a = me.attributes.new(name=name, type=kind, domain="POINT")
     a.data.foreach_set("value", np.asarray(values).reshape(-1).astype(
