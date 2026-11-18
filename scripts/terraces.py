@@ -878,7 +878,7 @@ def _cg(apply_A, b, x0, diag, iters=800, tol=1e-5):
 
 def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, field_m=30.0,
                   reach_m=20.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=0.0, snap_w=100.0):
+                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=100.0, carve_smooth_m=150.0):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
     band / sun_az: dark wall bands (walls facing away from the sun, with their
@@ -886,7 +886,9 @@ def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, fiel
     away from the sun: the step direction comes from the photo, not from the
     old DEM. relief_m: relief at scales shorter than this comes from counting
     benches (H per bench); the DEM only gives the shape at longer scales
-    (0, the default = the bench system follows the DEM's relief; >0 made lumpy floors on the real site).
+    (0 = the bench system is squeezed into the DEM's relief, lower walls). Ground the steps would
+    raise above the measured surface is lowered by a correction smoothed over carve_smooth_m
+    (a 15 m correction made lumpy dents).
 
     1. At each line pixel: the bench direction (structure tensor of the
        lines), the downhill side (DEM smoothed at dir_m) and the spacing to
@@ -1022,7 +1024,7 @@ def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, fiel
         # short-range relief from counting benches, long-range shape from the DEM
         zt = gauss(zc - H * u, relief_m / 2 / res) + H * st - carve * H
         # where that rises above the ground, lower it locally (carved, not built up)
-        up = gauss(np.clip(zt - zc, 0, None), 15.0 / res)
+        up = gauss(np.clip(zt - zc, 0, None), carve_smooth_m / 2 / res)
         zt = zt - up
     else:
         zt = zb + H * (st - u) - carve * H
