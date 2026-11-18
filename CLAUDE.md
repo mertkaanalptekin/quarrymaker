@@ -300,6 +300,7 @@ The user is an architect, not a programmer, so every feature must be reachable f
   - The 30 m DEM (2011–2015) cannot confirm bench levels there.
   - The bench lines traced in the photo gave the plan look the user approved; the carved benches (below) replace the shallow cut sheet.
   - The user reports that the sun is in the southeast.
+- **Site research:** `docs/KOCABAS_SITE_RESEARCH.md` collects the geology and quarrying facts (Turkish and international sources): travertine, not metamorphic marble; benches usually 6–8 m (3.5–9.4 m), saw-cut faces 80–90°, ~3.8 m cutting lifts at a Kaklık quarry, blocks ~2.0×1.6×1.5 m; mined beds 5–25 m between marl/clay bands; N60°W and E–W faults/joints. It suggests a 7 m default bench height (not yet changed; the user decides).
 - **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
 - **Possible:** bench heights from shadow widths (this needs the sun elevation); an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
 - **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 9 m vs true 10 m): 52% against 63% for the plain DEM (documented limit).
