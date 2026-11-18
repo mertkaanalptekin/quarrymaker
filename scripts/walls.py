@@ -120,3 +120,40 @@ def wall_lines_from_bands(band, res: float, min_len_m: float = 12.0):
     keep = cnt * res >= min_len_m
     keep[0] = False
     return keep[lab]
+
+
+def model_shadows(z, res: float, sun_az: float, sun_el: float, max_m: float = 40.0):
+    """Where a terrain model would look dark from above with this sun: cast
+    shadows (ray-marched toward the sun) and faces turned away from the sun."""
+    H, W = z.shape
+    sc, sr = math.sin(math.radians(sun_az)), -math.cos(math.radians(sun_az))   # toward the sun (col, row)
+    t = math.tan(math.radians(sun_el))
+    shade = np.zeros(z.shape, bool)
+    rows, cols = np.mgrid[0:H, 0:W]
+    for k in np.arange(1, max_m / res + 1):
+        r = np.clip(np.round(rows + sr * k).astype(int), 0, H - 1)
+        c = np.clip(np.round(cols + sc * k).astype(int), 0, W - 1)
+        shade |= z[r, c] > z + k * res * t + 0.3
+    gy, gx = np.gradient(z, res)                       # row (south) and column (east) slopes
+    nxyz = np.stack([-gx, gy, np.ones_like(z)], -1)    # east, north, up
+    nxyz /= np.linalg.norm(nxyz, axis=-1, keepdims=True)
+    s = np.array([math.cos(math.radians(sun_el)) * math.sin(math.radians(sun_az)),
+                  math.cos(math.radians(sun_el)) * math.cos(math.radians(sun_az)), math.sin(math.radians(sun_el))])
+    self_shade = (nxyz @ s) < 0.35
+    return shade | self_shade
+
+
+def shadow_agreement(model_dark, photo_band, within, tol_px: int = 1):
+    """How well the model's dark areas match the photo's wall bands (inside
+    `within`). precision: model-dark pixels near a photo band; recall: photo
+    band pixels near model-dark ones. Returns dict with precision, recall, f1."""
+    def dil(m):
+        return T.box_blur(m.astype(float), tol_px) > 0 if tol_px > 0 else m
+    md = model_dark & within
+    pb = photo_band & within
+    if md.sum() == 0 or pb.sum() == 0:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    p = float((md & dil(pb)).sum()) / float(md.sum())
+    r = float((pb & dil(md)).sum()) / float(pb.sum())
+    f = 2 * p * r / max(p + r, 1e-9)
+    return {"precision": round(p, 3), "recall": round(r, 3), "f1": round(f, 3)}

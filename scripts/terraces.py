@@ -966,7 +966,7 @@ def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_d
 
 def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, field_m=30.0,
                   reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0):
+                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=20.0):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
     band / sun_az: dark wall bands (walls facing away from the sun, with their
@@ -1086,7 +1086,7 @@ def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, fiel
     u = _cg(A, b, np.zeros_like(zc), diag, iters=1500, tol=1e-6)
     # snap: whole numbers on the traced lines (the wall is the line)
     tgt = np.where(sk, np.round(u) - u, 0.0)
-    wd = np.where(sk, 20.0, 0.0)
+    wd = np.where(sk, snap_w, 0.0)
     lam2 = (res / snap_m) ** 2
 
     def A2(x):
