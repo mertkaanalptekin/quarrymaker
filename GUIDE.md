@@ -129,13 +129,25 @@ Step 7 first finds the **quarry area** in the photo. This is bare rock and dumps
 separate from fields, greenhouses and villages. If it includes something that isn't quarry (for
 example a factory), trace the quarry outline yourself in step 1.
 
-It then traces the **bench lines** in the photo: the long light and dark edges that bench faces and
-their shadows draw. Lines along roads and in block yards are left out. The benches are then **laid
-out by the photo's lines**, not by the elevation data: the program measures the direction of the
-benches and the spacing between them in the photo, and builds rows of flat floors with tall,
-near-vertical walls that run along those lines. Every wall is one full bench high along its whole
-length; where the benches in the photo end, the walls end. Where the photo shows no benches, the
-measured ground is kept. The image `07_bench_lines.png` shows the traced lines in red.
+It then reads the walls from the photo.
+- **Sharper photo.** It downloads a sharper photo of just the quarry area (about 0.5 m per pixel).
+- **Sun.** It looks up when the photo was taken, so it knows where the sun was. For your site that
+  is 1 July 2023, mid-morning, with the sun in the south-east.
+- **Walls in shade.** These show as dark bands, the wall face plus its shadow. A dark band tells
+  exactly where a wall is, and that the floor on the side away from the sun is the lower one.
+- **Walls facing the sun.** These are found from the light and dark edges in the photo.
+
+The benches are then **laid out by these walls**: rows of flat floors with tall, near-vertical walls,
+following the direction and spacing of the benches in the photo. Each wall is one full bench high.
+Walls are only built where the photo shows them; where it shows none, the measured ground is kept.
+
+**Checking the result.** The image `07_shadow_check.png` lights the model with the photo's sun and
+compares its shaded walls with the dark wall bands in the photo:
+- yellow: they agree;
+- blue: a wall the model missed;
+- red: a model wall the photo does not show.
+
+The score (F1, 0–1) is in the report. Higher is better; the plain elevation data scores 0.
 
 - **Wall height:** your bench height from step 2. If you leave it on "calculate", **7 m** is
   used, the typical bench height in the Denizli travertine quarries (6–8 m; see `docs/KOCABAS_SITE_RESEARCH.md`).
@@ -174,8 +186,8 @@ and usable. Look at the bench evidence image, then:
 Step 8 writes `quarry_plan.dxf` (open it in Rhino with units set to Meters) with these layers:
 - **QUARRY_OUTLINE:** the quarry area.
 - **BENCH_LINES:** the bench edges traced in the photo, as 3D lines at their elevation. Use
-  *ProjectToCPlane* in Rhino for a flat plan. Shadow edges are left out; the sun direction is set in
-  `config.yaml` (`sun_azimuth_deg`, 135 = southeast).
+  *ProjectToCPlane* in Rhino for a flat plan. Shadow edges are left out, using the sun direction step 7
+  computed from the photo's date.
 - **ROADS:** road centrelines.
 - **AGRICULTURE:** farmland outlines.
 - **BLOCK_YARDS:** block stone depositing and staging areas.

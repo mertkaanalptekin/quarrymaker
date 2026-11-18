@@ -44,7 +44,9 @@ def main(argv=None) -> int:
     args, cfg, paths, log = common.stage_context(__doc__, "08", argv)
     pc = dict(DEFAULTS)
     pc.update(cfg.get("plan") or {})
-    pc["sun_azimuth_deg"] = float((cfg.get("terraces") or {}).get("sun_azimuth_deg", pc["sun_azimuth_deg"]))
+    sun_c = (cfg.get("terraces") or {}).get("sun_azimuth_deg", "auto")
+    if str(sun_c).lower() != "auto":
+        pc["sun_azimuth_deg"] = float(sun_c)
     if not args.force and common.stage_up_to_date(paths, cfg, "08"):
         log.info("Stage 08 up to date - skipping.")
         return 0
@@ -60,6 +62,10 @@ def main(argv=None) -> int:
     tf = from_origin(e["xmin"], e["ymax"], res, res)
     ortho = paths.processed / "ortho_utm.tif"
     terr = paths.root / "terrain" / "10_terraces" / paths.run_id
+    if str(sun_c).lower() == "auto" and (terr / "terraces_params.json").exists():
+        sun7 = (common.read_json(terr / "terraces_params.json").get("traced") or {}).get("sun") or {}
+        if sun7.get("azimuth_deg") is not None:
+            pc["sun_azimuth_deg"] = float(sun7["azimuth_deg"])     # computed by step 07 from the photo's date
 
     # surface for the 3D bench lines: the terraced surface when step 07 ran
     z = np.zeros((H, W), "float32")

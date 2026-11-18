@@ -60,7 +60,9 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   line_min_length_m: 18     # bench lines shorter than this are ignored (rubble, blocks)
   bench_smoothing_m: 30     # dem_steps only: how strongly the ground between bench lines is flattened
   max_cut_m: 12             # dem_steps only: largest change allowed by the cut benches
-  sun_azimuth_deg: 135      # direction of the sun in the photo (135 = southeast); shadow ends are not benches
+  sun_azimuth_deg: auto     # sun direction in the photo; auto = computed from the photo's capture date (or e.g. 135 = southeast)
+  sun_elevation_deg: auto   # sun height in the photo; auto = computed from the capture date (or a number in degrees)
+  detail_zoom: 18           # sharper photo (~0.5 m) downloaded over the quarry for walls and lines; 0 = use stage 03's photo
   bench_style: carved       # carved = benches laid out by the photo's bench lines, walls of one fixed height, flat
                             #          floors (marble quarries) | dem_steps = steps only as tall as the DEM drop
   carve_bench_height_m: 7   # wall height when bench_height_m is auto: 6-8 m is typical in the Denizli travertine quarries (docs/KOCABAS_SITE_RESEARCH.md)

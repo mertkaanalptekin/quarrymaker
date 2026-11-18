@@ -178,6 +178,9 @@ rhino:
   formats: [obj, fbx]
 terraces:
   enabled: true
+  sun_azimuth_deg: 150      # the synthetic photo's sun (see colour()); no metadata lookup
+  sun_elevation_deg: 48
+  detail_zoom: 0            # offline test: no sharper photo
 """
 
 

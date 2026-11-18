@@ -157,3 +157,89 @@ def shadow_agreement(model_dark, photo_band, within, tol_px: int = 1):
     r = float((pb & dil(md)).sum()) / float(pb.sum())
     f = 2 * p * r / max(p + r, 1e-9)
     return {"precision": round(p, 3), "recall": round(r, 3), "f1": round(f, 3)}
+
+
+WAYBACK_CONFIG_URL = "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json"
+ESRI_TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+
+
+def detail_ortho(root, utm_bounds, epsg: int, zoom: int, out_path, tile_url=None, res_m=0.5,
+                 max_tiles=6000, throttle=0.1, log=None):
+    """Download Esri World Imagery tiles at `zoom` over utm_bounds (xmin, ymin,
+    xmax, ymax) and write them as a GeoTIFF in the project CRS at res_m.
+    Tiles are cached in data/raw/tiles/esri_world_imagery/<zoom>/ (shared with
+    stage 02). Returns out_path; raises on failure (callers fall back)."""
+    import importlib.util
+    import time
+    from pathlib import Path
+
+    import rasterio
+    import requests
+    from PIL import Image
+    from pyproj import Transformer
+    from rasterio.transform import from_origin
+    from rasterio.warp import Resampling, reproject
+
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location("fetch_imagery", here / "02_fetch_imagery.py")
+    f2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(f2)
+    xmin, ymin, xmax, ymax = utm_bounds
+    to_ll = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+    w, n = to_ll.transform(xmin, ymax)
+    e, s = to_ll.transform(xmax, ymin)
+    w2, s2 = to_ll.transform(xmin, ymin)
+    e2, n2 = to_ll.transform(xmax, ymax)
+    w, e, s, n = min(w, w2), max(e, e2), min(s, s2), max(n, n2)
+    tx0, ty0 = f2.lonlat_to_tile(w, n, zoom)
+    tx1, ty1 = f2.lonlat_to_tile(e, s, zoom)
+    nx, ny = tx1 - tx0 + 1, ty1 - ty0 + 1
+    if nx * ny > max_tiles:
+        raise RuntimeError(f"detail photo needs {nx * ny} tiles (cap {max_tiles})")
+    url_t = tile_url or ESRI_TILE_URL
+    cache = Path(root) / "data" / "raw" / "tiles" / "esri_world_imagery" / str(zoom)
+    sess = requests.Session()
+    sess.headers["User-Agent"] = f2.USER_AGENT
+    mos = np.zeros((ny * 256, nx * 256, 3), "uint8")
+    got = 0
+    for j, y in enumerate(range(ty0, ty1 + 1)):
+        for i, x in enumerate(range(tx0, tx1 + 1)):
+            tp = cache / str(x) / f"{y}.img"
+            if not tp.exists():
+                for attempt in range(4):
+                    try:
+                        r = sess.get(url_t.format(z=zoom, x=x, y=y), timeout=30)
+                        if r.status_code == 200 and r.content:
+                            break
+                    except requests.RequestException:
+                        pass
+                    time.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError(f"tile download failed: z{zoom} x{x} y{y}")
+                tp.parent.mkdir(parents=True, exist_ok=True)
+                tp.write_bytes(r.content)
+                got += 1
+                time.sleep(throttle)
+            with Image.open(tp) as im:
+                mos[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = np.asarray(im.convert("RGB"))
+        if log and (j + 1) % 10 == 0:
+            log.info("  detail photo: row %d/%d (%d new tiles)", j + 1, ny, got)
+    mx0, _, _, my1 = f2.tile_bounds_merc(tx0, ty0, zoom)
+    px = 2 * f2.WEBM / 2 ** zoom / 256
+    W = int(np.ceil((xmax - xmin) / res_m))
+    H = int(np.ceil((ymax - ymin) / res_m))
+    dst = np.zeros((3, H, W), "uint8")
+    tf = from_origin(xmin, ymax, res_m, res_m)
+    reproject(mos.transpose(2, 0, 1), dst, src_transform=from_origin(mx0, my1, px, px), src_crs="EPSG:3857",
+              dst_transform=tf, dst_crs=f"EPSG:{epsg}", resampling=Resampling.bilinear)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(".part.tif")
+    with rasterio.open(tmp, "w", driver="GTiff", width=W, height=H, count=3, dtype="uint8",
+                       crs=f"EPSG:{epsg}", transform=tf, compress="deflate", tiled=True,
+                       photometric="RGB") as ds:
+        ds.write(dst)
+    tmp.replace(out_path)
+    if log:
+        log.info("Detail photo: zoom %d, %d tiles (%d downloaded), %.2f m pixels", zoom, nx * ny, got, res_m)
+    return out_path

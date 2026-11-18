@@ -216,10 +216,33 @@ Calculates the quarry's benches from the satellite image with the help of the DE
 - **Levels and surface:** in each zone, bench floors sit at fixed elevations `G + (n + 0.5)·H`. The DEM surface is corrected locally, by at most ±H/2, to meet them. Benches are built only where a zone has evidence (class 5 = pit without clear benches, which keeps the measured surface).
 - **Benches carved along the photo's bench lines** (`method: auto`, where no zone is confirmed; illustrative; `bench_style: carved`, the default):
   - **Lines:** bench lines are traced at the photo's full resolution with Canny edges (gradient, 1-px thinning, hysteresis). Only long, extended lines (≥ `line_min_length_m`) on bare ground are kept, so rubble and blocks give no lines. Lines on roads (white top-hat) and block yards (blob density) are dropped.
-  - **Layout from the photo (`photo_benches`), not from DEM contours:** at each line pixel the bench direction (structure tensor), downhill side (DEM smoothed 60 m) and spacing to the next line downhill (photo bench width) are measured, then spread by normalised convolution (30 m); the weight fades to 0 beyond 40 m from any line, so no benches are invented.
-  - **Bench number u:** Poisson solve with ∇u = −(downhill normal)/spacing, so its contours run along the photo's benches; u is snapped to integers on the traced lines (screened Poisson, ≤ 0.5). Floors are flat steps of u, H each, laid on the DEM smoothed at 60 m and lowered H/2. Every wall is a full H along its length; walls end where the photo's benches end (no fading). H is `bench_height_m`, or `carve_bench_height_m` (9 m guess; the user says 8–10 m is plausible).
-  - **Blockier look (user request):** walls 85°, floors levelled within their own bench level over `flat_floor_m` (30 m), bench-number solve screened at 300 m (local consistency; converges on any site size). Rejected: rotated 8 m cells with one level each (levels don't align with cells → neighbouring cells alternate, chaotic at full-site scale), snapping directions to a perpendicular pair inside the solve (broken walls).
-  - Rejected variants (for the record): flattening whole connected floor pieces (big jumps, spikes); DEM-contour levels snapped to lines (user: walls follow the DEM, not the photo); regions between lines (lines don't close); counting lines uphill (seams fan out); a step per line segment (isolated notches).
+  - **Inputs (2026-11 method review):**
+    - a **sharper photo** (`detail_zoom: 18`, ~0.5 m) is downloaded over the quarry only (cached; falls back to stage 03's photo);
+    - the **sun** comes from the photo's capture date: the Esri Wayback metadata service gives date and sensor (real site: GeoEye-1, 2023-07-01), and the sun is computed for ~10:30 local solar time (az 121°, el 66°). Both can be set in config.
+  - **Wall bands (`walls.py`):** walls facing away from the sun are in shade and cast a shadow, so from above they show as a dark band along the wall. The band marks the wall exactly, and **the lower floor is on the side away from the sun**. These steps take their direction from the photo, not from the old DEM. Sun-facing walls show no band; they come from the Canny lines, with direction from the DEM.
+  - **Layout (`photo_benches`):**
+    - bench direction (structure tensor) and spacing to the next line downhill are measured on the lines, then spread by normalised convolution (30 m);
+    - weight falls to 0 beyond `reach_m` = 20 m from any line;
+    - the signed normals spread directly (sun-signed on bands).
+  - **Bench number u:** screened Poisson (300 m) with ∇u = −(downhill normal)/spacing, snapped to integers on the lines (weight 100, 10 m).
+  - **Relief split:** relief at scales < 300 m comes from counting benches (H each); the DEM gives only the longer-scale shape (`relief_m`). Parts that would rise above the ground are lowered locally (carved).
+  - **Floors and walls:** floors are flat plates per level (`flat_floor_m` 30 m); walls are 85°. H is `bench_height_m`, else `carve_bench_height_m` = 7 m, the typical Denizli bench (6–8 m; docs/KOCABAS_SITE_RESEARCH.md).
+  - **Objective check (`07_shadow_check.png`, `photo_agreement` in params):** the model is rendered with the photo's sun (cast shadows plus faces turned away) and compared with the photo's wall bands. Measures: precision, recall, F1, ±1 cell.
+  - **Tuning results (1 km test areas, reference = zoom-18 bands):**
+
+    | Area | Plain DEM | Previous method (zoom 17) | New method |
+    |---|---|---|---|
+    | B | 0 | 0.21–0.24 | 0.41 |
+    | A (held out) | 0 | 0.10 | 0.29 |
+
+    The detail photo and the 20 m reach gave most of the gain.
+  - **Rejected in the review:**
+    - TV/IRLS surface from wall drops: short wall pieces became spikes and pillars, because without a global bench layout an island is cheaper than a wall;
+    - rotated 8 m level cells;
+    - snapping directions to a perpendicular pair;
+    - regions between lines; counting lines uphill; a step per segment;
+    - DEM-contour levels.
+  - **Height from band width (not used):** shadow plus visible face width ∝ height, but the unknown view angle and the 0.5 m pixel make it too noisy (median band 1.5–2.5 m wide).
   - **Labelling:** `bench_method` = 2 marks these cells, and they are drawn in `07_bench_lines.png`.
   - **Known limits:**
     - the overall depth follows the old DEM; parts dug deeper since are too shallow;
@@ -304,7 +327,11 @@ The user is an architect, not a programmer, so every feature must be reachable f
 - **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
 - **Possible:** bench heights from shadow widths (this needs the sun elevation); an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
 - **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 9 m vs true 10 m): 52% against 63% for the plain DEM (documented limit).
-- **Carved benches (latest):** the user found the DEM-drop steps too shallow, then found DEM-contour walls inconsistent with the photo. Stage 07 now lays out benches from the photo's lines (direction + spacing), full-height walls (9 m default), minimal fading (`bench_style: carved`). The user then asked for blockier benches like the satellite image: flat floor plates (`flat_floor_m`), 85° walls; rectilinear cells were tried and rejected.
+- **Carved benches (latest):**
+  - The user found the DEM-drop steps too shallow, then DEM-contour walls inconsistent with the photo, then results "sometimes arbitrary".
+  - Method review (2026-11): sharper zoom-18 photo, sun from the photo's date, wall bands with sun-signed steps, relief split (photo < 300 m, DEM above), walls only near evidence, and an objective photo-agreement score (`07_shadow_check.png`).
+  - Default H is 7 m from the sources.
+  - No better elevation data is freely available for the site (COP30 is the best open DEM; HGM 5 m and TanDEM-X 12 m are not open).
 
 ## Out of scope for this task (later stages will use these outputs)
 - Haul-road and ramp reconstruction (benches and pit masks are now stage 07).

@@ -61,7 +61,10 @@ DEFAULTS = {
     "line_min_length_m": 18.0,      # bench lines shorter than this are ignored (rubble, blocks)
     "bench_smoothing_m": 30.0,      # how strongly the ground between lines is flattened
     "max_cut_m": 12.0,              # largest change allowed by the cut benches
-    "sun_azimuth_deg": 135.0,       # where the sun is (135 = southeast); shadow ends are not benches
+    "sun_azimuth_deg": "auto",      # sun direction in the photo; auto = from the photo's capture date (else 135)
+    "sun_elevation_deg": "auto",    # sun height in the photo; auto = from the capture date (else 60)
+    "detail_zoom": 18,              # sharper photo (0.5 m) over the quarry for walls and lines; 0 = use stage 03's
+    "detail_max_tiles": 6000,
     "bench_style": "carved",        # carved = fixed-height walls, flat floors | dem_steps = steps as tall as the DEM drop
     "carve_bench_height_m": 7.0,    # wall height when bench_height_m is auto (Denizli quarries: usually 6-8 m)
     "wall_angle_deg": 85.0,         # carved walls (marble quarries: near vertical)
@@ -127,6 +130,7 @@ def main(argv=None) -> int:
 
     import linework as lw
     import terraces as T
+    import walls as WL
 
     args, cfg, paths, log = common.stage_context(__doc__, "07", argv)
     tc = tcfg(cfg)
@@ -383,12 +387,15 @@ def main(argv=None) -> int:
         within_tr = mask & (evidence <= 0.5)
         if tc.get("bare_ground_only", True):
             within_tr &= T.bare_ground(rgb, res, mask)
+        sun = sun_geometry(cfg, tc, mask, tf, crs, paths, log)
+        detail_tif = detail_photo(cfg, tc, mask, tf, crs, paths, log) or ortho_tif
         log.info("Tracing bench lines in the photo at full resolution ...")
-        lines = T.bench_lines_from_file(ortho_tif, tf, (H, W), crs, within_tr,
+        lines = T.bench_lines_from_file(detail_tif, tf, (H, W), crs, within_tr,
                                         min_len_m=float(tc["line_min_length_m"]),
-                                        sun_azimuth_deg=float(tc["sun_azimuth_deg"]), log=log)
+                                        sun_azimuth_deg=sun["azimuth_deg"], log=log)
         log.info("Cutting benches along %.1f km of bench lines ...", lines.sum() * res / 1000.0)
         style = str(tc.get("bench_style", "carved")).lower()
+        band_lines = None
         if style == "carved":
             # roads and block yards draw long bright edges too; they are not bench walls
             lum_ = rgb.astype("float64").mean(-1) / 255.0
@@ -399,10 +406,19 @@ def main(argv=None) -> int:
             n_before = int(lines.sum())
             lines = lines & ~excl
             log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
+            log.info("Finding wall bands (walls in shade and their shadows) in the photo ...")
+            band = WL.bands_from_file(detail_tif, tf, (H, W), crs, mask, log=log) & ~excl
+            band_lines = WL.wall_lines_from_bands(band, res)
+            log.info("Wall bands: %.1f km of walls facing away from the sun", band_lines.sum() * res / 1000.0)
+            lines = lines | (band_lines & within_tr)
             Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
             dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
                                           face_angle_deg=float(tc["wall_angle_deg"]),
-                                          flat_m=float(tc.get("flat_floor_m", 30.0)))
+                                          flat_m=float(tc.get("flat_floor_m", 30.0)),
+                                          band=band, sun_az=sun["azimuth_deg"])
+            linfo["sun"] = sun
+            linfo["detail_photo"] = str(detail_tif)
+            linfo["wall_band_km"] = round(float(band_lines.sum()) * res / 1000.0, 1)
             linfo["bench_height_source"] = "your value" if fixed_h is not None else "typical Denizli travertine bench, 6-8 m in the published sources (carve_bench_height_m)"
             if linfo:
                 log.info("Carved benches: %s m walls, bench spacing in the photo %s m, %.1f%% of the bench "
@@ -420,6 +436,7 @@ def main(argv=None) -> int:
         affected = (np.abs(dz_l) > 0.25) & (weight_l > 0.5)
         gz = np.hypot(*np.gradient(zt, res))
         trc = {"lines": lines, "info": linfo, "affected": affected, "dz": weight_l * dz_l,
+               "band_lines": band_lines if style == "carved" else None,
                "face": affected & lines & (gz > 0.5), "weight": weight_l * affected}
         if style == "carved":
             log.info("Benches carved along the photo's bench lines: %.1f ha changed", affected.sum() * res * res / 1e4)
@@ -597,12 +614,17 @@ def main(argv=None) -> int:
                      "R_edges": est["R_edges"].round(5).tolist(),
                      "R_baseline": est["R_base"].round(5).tolist()} if est else None,
     }
+    shadow_img = None
+    if trc is not None and trc.get("band_lines") is not None and trc["info"].get("sun"):
+        sun_ = trc["info"]["sun"]
+        params["photo_agreement"], shadow_img = shadow_check(paths, rgb, mask, z0, zt, trc["band_lines"], sun_,
+                                                             res, log)
     params_p = od / "terraces_params.json"
     common.write_json(params_p, params)
     files.append(params_p)
 
     # ---------------- check images ------------------------------------------
-    imgs = [ev_img, traced_image(paths, rgb, mask, method_map)] + (
+    imgs = [ev_img, traced_image(paths, rgb, mask, method_map)] + ([shadow_img] if shadow_img else []) + (
         [lines_image(paths, rgb, mask, trc["lines"])] if trc is not None else []) + check_images(paths, od, rgb, mask, En, z0, zt, zs, classes, confidence, est, Hb,
                                    res, (r0, r1, c0, c1), log)
 
@@ -815,6 +837,125 @@ def diagnostic_images(paths, rgb, mask, En, zl, w, zone, hmin, hmax, fixed_h):
     p = paths.checks / "07_contour_edges.png"
     two.save(p)
     return [p]
+
+
+def shadow_check(paths, rgb, mask, z0, zt, band_lines, sun, res, log):
+    """Objective check against the photo: render where the model would be dark
+    with the photo's sun, and compare with the wall bands seen in the photo.
+    Returns (scores, image path)."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    import terraces as T
+    import walls as WL
+    ref = T.box_blur(band_lines.astype(float), 1) > 0
+    az, el = float(sun["azimuth_deg"]), float(sun["elevation_deg"])
+    dark_m = WL.model_shadows(z0.astype("float64"), res, az, el)
+    dark_t = WL.model_shadows(zt.astype("float64"), res, az, el)
+    sc = {"measured_dem": WL.shadow_agreement(dark_m, ref, mask),
+          "interpreted": WL.shadow_agreement(dark_t, ref, mask),
+          "note": "Share of the model's shaded walls that lie on a wall band seen in the photo (precision), "
+                  "share of the photo's wall bands the model reproduces (recall), and their F1 (1 = perfect). "
+                  "Only walls facing away from the sun can be checked this way."}
+    log.info("Photo agreement (walls in shade): measured DEM F1 %.2f, interpreted F1 %.2f (precision %.2f, "
+             "recall %.2f)", sc["measured_dem"]["f1"], sc["interpreted"]["f1"], sc["interpreted"]["precision"],
+             sc["interpreted"]["recall"])
+    rows, cols = np.nonzero(mask)
+    sl = (slice(rows.min(), rows.max() + 1), slice(cols.min(), cols.max() + 1))
+    img = (rgb[sl].astype("float32") * 0.75).astype("uint8")
+    mt = (dark_t & mask)[sl]
+    rf = ref[sl] & mask[sl]
+    both = mt & (T.box_blur(rf.astype(float), 1) > 0)
+    img[rf & ~both] = [40, 110, 255]
+    img[mt & ~both & ~rf] = [255, 60, 40]
+    img[both | (rf & (T.box_blur(mt.astype(float), 1) > 0))] = [255, 230, 0]
+    im = Image.fromarray(img)
+    k = max(1, int(np.ceil(max(im.size) / 2400)))
+    if k > 1:
+        im = im.resize((im.size[0] // k, im.size[1] // k), Image.NEAREST)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, im.size[0], 40], fill=(255, 255, 255))
+    d.text((8, 4), f"Walls in shade - yellow: model and photo agree, blue: photo only, red: model only. "
+                   f"F1 {sc['interpreted']['f1']:.2f} (measured DEM {sc['measured_dem']['f1']:.2f})", fill=(0, 0, 0))
+    d.text((8, 22), f"Sun azimuth {az:.0f} deg, elevation {el:.0f} deg ({sun.get('source', '')[:90]})", fill=(0, 0, 0))
+    p = paths.checks / "07_shadow_check.png"
+    im.save(p)
+    return sc, p
+
+
+def sun_geometry(cfg, tc, mask, tf, crs, paths, log) -> dict:
+    """Sun azimuth/elevation of the photo: from config, else from the photo's
+    capture date (Esri imagery metadata) at ~10:30 local solar time, else 135/60."""
+    import datetime
+
+    import numpy as np
+    from pyproj import Transformer
+
+    import walls as WL
+    rows, cols = np.nonzero(mask)
+    cx = tf.c + (cols.mean() + 0.5) * tf.a
+    cy = tf.f + (rows.mean() + 0.5) * tf.e
+    lon, lat = Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(cx, cy)
+    out = {"azimuth_deg": 135.0, "elevation_deg": 60.0, "source": "default (south-east, 60 deg)"}
+    az_c, el_c = str(tc.get("sun_azimuth_deg", "auto")).lower(), str(tc.get("sun_elevation_deg", "auto")).lower()
+    if az_c == "auto" or el_c == "auto":
+        cache = paths.root / "data" / "raw" / "imagery_metadata.json"
+        meta = None
+        if cache.exists():
+            meta = json.loads(cache.read_text(encoding="utf-8"))
+        else:
+            meta = WL.imagery_metadata(lon, lat, WL.WAYBACK_CONFIG_URL)
+            if meta:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        if meta and meta.get("date"):
+            d = datetime.date.fromisoformat(meta["date"])
+            az, el = WL.sun_position(d, lat)
+            out = {"azimuth_deg": round(az, 1), "elevation_deg": round(el, 1),
+                   "source": f"photo captured {meta['date']} by {meta.get('sensor')} ({meta.get('provider')}), "
+                             "sun computed for ~10:30 local solar time", "photo": meta}
+        else:
+            log.warning("Could not read the photo's capture date; assuming the sun in the south-east, 60 deg high.")
+    if az_c != "auto":
+        out["azimuth_deg"] = float(tc["sun_azimuth_deg"])
+        out["source"] += "; azimuth from config"
+    if el_c != "auto":
+        out["elevation_deg"] = float(tc["sun_elevation_deg"])
+        out["source"] += "; elevation from config"
+    log.info("Sun in the photo: azimuth %.0f deg, elevation %.0f deg (%s)", out["azimuth_deg"],
+             out["elevation_deg"], out["source"])
+    return out
+
+
+def detail_photo(cfg, tc, mask, tf, crs, paths, log):
+    """Sharper photo (Esri zoom 18, ~0.5 m) over the quarry area, cached. None if
+    disabled or not available (the stage 03 photo is used instead)."""
+    import numpy as np
+
+    import walls as WL
+    z = int(tc.get("detail_zoom", 18) or 0)
+    if z <= 0:
+        return None
+    rows, cols = np.nonzero(mask)
+    m = 60.0
+    xmin = tf.c + cols.min() * tf.a - m
+    xmax = tf.c + (cols.max() + 1) * tf.a + m
+    ymax = tf.f + rows.min() * tf.e + m
+    ymin = tf.f + (rows.max() + 1) * tf.e - m
+    from rasterio.crs import CRS
+    epsg = CRS.from_user_input(crs).to_epsg()
+    h = common.bbox_hash(z, round(xmin), round(ymin), round(xmax), round(ymax), epsg)
+    out = paths.processed / f"ortho_detail_z{z}_{h}.tif"
+    if out.exists():
+        return out
+    try:
+        log.info("Downloading the sharper photo (zoom %d) over the quarry area ...", z)
+        return WL.detail_ortho(paths.root, (xmin, ymin, xmax, ymax), epsg, z, out,
+                               tile_url=(cfg.get("imagery") or {}).get("tile_url"),
+                               max_tiles=int(tc.get("detail_max_tiles", 6000)), log=log)
+    except Exception as ex:   # offline, capped or unavailable: use the stage 03 photo
+        log.warning("Sharper photo not available (%s); using the stage 03 photo.", ex)
+        return None
 
 
 def _load(name, file):

@@ -251,32 +251,6 @@ def estimate_bench_height(z, w, base_w, h_min, h_max, step=0.05):
             "edge_level_m": level, "h_values": hs, "R_edges": Re, "R_base": Rb}
 
 
-def null_scores(z, w, zone, h_min, h_max, n=8, seed=0, step=0.05):
-    """Best spectrum score after shifting the edge map against the DEM.
-
-    Real benches put edges at specific elevations; shifting the edge map
-    destroys that, while generic line patterns (roads, field edges, texture)
-    keep producing similar scores. Returns the list of null maxima."""
-    rng = np.random.default_rng(seed)
-    rows, cols = np.where(zone)
-    r0, r1, c0, c1 = rows.min(), rows.max() + 1, cols.min(), cols.max() + 1
-    hh, ww = r1 - r0, c1 - c0
-    sub_w = w[r0:r1, c0:c1]
-    sub_z = z[r0:r1, c0:c1]
-    sub_zone = zone[r0:r1, c0:c1]
-    out = []
-    for _ in range(n):
-        dy = int(rng.uniform(0.25, 0.75) * hh) * rng.choice([-1, 1])
-        dx = int(rng.uniform(0.25, 0.75) * ww) * rng.choice([-1, 1])
-        ws = np.roll(np.roll(sub_w, dy, 0), dx, 1) * sub_zone
-        if ws.sum() <= 0:
-            continue
-        e = estimate_bench_height(sub_z[sub_zone], ws[sub_zone], np.ones(int(sub_zone.sum())),
-                                  h_min, h_max, step)
-        out.append(e["score"])
-    return out
-
-
 def local_levels(z, w, H, sigma_px, global_level, prior=0.05):
     """Field of local 'face-centre' level (mod H) and its confidence 0..1.
     H and global_level may be scalars or per-pixel arrays."""
@@ -454,32 +428,6 @@ def apply_sitewide_threshold(tiles, sig_min):
 
 def tile_is_significant(t, sig_min=1.5, score_min=0.05):
     return t["sig"] >= sig_min and t["score"] >= score_min
-
-
-def tile_fields(tiles, shape, sig_lo=1.3, sig_hi=2.0, score_min=0.05):
-    """Blend tile results into smooth per-pixel fields with tent windows.
-
-    evidence: 0..1, how strongly the surrounding regions show benches.
-    H: bench height, weighted by evidence (NaN where no region has evidence)."""
-    num_e = np.zeros(shape, "float32")
-    den = np.zeros(shape, "float32")
-    num_h = np.zeros(shape, "float32")
-    den_h = np.zeros(shape, "float32")
-    for t in tiles:
-        h, w = t["r1"] - t["r0"], t["c1"] - t["c0"]
-        ty = 1 - np.abs(np.linspace(-1, 1, h + 2)[1:-1])
-        tx = 1 - np.abs(np.linspace(-1, 1, w + 2)[1:-1])
-        tri = np.outer(ty, tx).astype("float32")
-        e = float(smoothstep(t["sig"], sig_lo, sig_hi)) if t["score"] >= score_min else 0.0
-        sl = (slice(t["r0"], t["r1"]), slice(t["c0"], t["c1"]))
-        den[sl] += tri
-        if e > 0:
-            num_e[sl] += tri * e
-            num_h[sl] += tri * e * t["H"]
-            den_h[sl] += tri * e
-    evidence = np.where(den > 0, num_e / np.maximum(den, 1e-6), 0).astype("float32")
-    hfield = np.where(den_h > 0, num_h / np.maximum(den_h, 1e-6), np.nan).astype("float32")
-    return evidence, hfield
 
 
 def tile_zones(tiles, sig_min=1.5, score_min=0.05, h_tol=0.15):
@@ -800,7 +748,6 @@ def quarry_area(rgb, z0, res, transform, keep_polygon=None, min_area_ha=5.0, ope
                           "source": "quarry area: bare rock + relief, roads cut, large bodies only"}
 
 
-
 def bench_lines_from_file(ortho_path, dst_transform, dst_shape, crs, within, block_m=600.0,
                           sigma_m=1.0, min_len_m=18.0, sun_azimuth_deg=135.0, log=None):
     """Bench lines traced at the photo's full resolution, block by block, and
@@ -929,44 +876,9 @@ def _cg(apply_A, b, x0, diag, iters=800, tol=1e-5):
     return x
 
 
-def bench_height_from_lines(z_s, lines, within, res, max_gap_m=60.0, min_slope_deg=6.0):
-    """Bench height guessed from the photo and the DEM together: on a benched
-    slope consecutive bench lines lie one bench apart, so the spacing between
-    neighbouring lines measured downhill, times the tangent of the large-scale
-    slope, is one bench height. Returns (H or None, number of samples)."""
-    gr, gc = np.gradient(z_s, res)
-    g = np.hypot(gr, gc)
-    ok = lines & within & (np.degrees(np.arctan(g)) > min_slope_deg)
-    rr, cc = np.nonzero(ok)
-    if rr.size < 50:
-        return None, int(rr.size)
-    if rr.size > 20000:
-        sel = np.random.default_rng(0).choice(rr.size, 20000, replace=False)
-        rr, cc = rr[sel], cc[sel]
-    ur, uc = -gr[rr, cc] / g[rr, cc], -gc[rr, cc] / g[rr, cc]       # downhill
-    Hh, Ww = lines.shape
-    gaps = np.full(rr.size, np.nan)
-    alive = np.ones(rr.size, bool)
-    start = max(2, int(np.ceil(4.0 / res)))                          # leave the own line
-    for k in range(start, int(max_gap_m / res) + 1):
-        r = np.round(rr + ur * k).astype(int)
-        c = np.round(cc + uc * k).astype(int)
-        inb = (r >= 0) & (r < Hh) & (c >= 0) & (c < Ww)
-        hit = np.zeros(rr.size, bool)
-        hit[inb] = lines[r[inb], c[inb]]
-        new = alive & hit
-        gaps[new] = k * res
-        alive &= ~hit & inb
-    h = gaps * g[rr, cc]
-    h = h[np.isfinite(h)]
-    if h.size < 50:
-        return None, int(h.size)
-    return float(np.median(h)), int(h.size)
-
-
-def photo_benches(z0, lines, within, res, bench_h=9.0, face_angle_deg=85.0, field_m=30.0,
-                  reach_m=40.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=20.0):
+def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, field_m=30.0,
+                  reach_m=20.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
+                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=100.0):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
     band / sun_az: dark wall bands (walls facing away from the sun, with their
