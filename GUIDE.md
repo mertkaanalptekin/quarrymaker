@@ -187,6 +187,29 @@ and usable. Look at the bench evidence image, then:
 - if most of the quarry was dug after 2015, the elevation data is simply too old to show its
   benches; untick "Calculate the benches".
 
+## Drawing the benches yourself (Rhino)
+
+If you know the quarry better than the automatic tracing, draw the bench edges yourself:
+1. **Draw.** Open the Quarry Maker model in Rhino and look at it from the top. Draw a polyline along
+   every bench edge (projected to the CPlane is fine) on a layer whose name contains "bench", for
+   example "Quarry Benches". **Do not move or scale the model.**
+2. **Export.** Select the lines, then **File → Export Selected…**, and save as `.3dm` (or `.dxf`)
+   into the `data/reference` folder of Quarry Maker.
+3. **Choose the file.** In the app, step 2, choose it under **Your bench lines** and press
+   **Save settings**. Then run step 7 again; the results go into a new version folder.
+
+Step 7 then builds a wall exactly on every line you drew. The ground between the lines becomes
+exactly flat bench floors, one bench height apart. Which side of a line is lower is decided for the
+whole line: from the wall's shadow in the photo where it is visible, otherwise from the terrain.
+
+You also get `quarry_terraced.3dm` in the Rhino folder (`exchange/rhino/vNNN/terraced/`), with these
+layers:
+- **your lines;**
+- **the same lines at the top of their walls (3D);**
+- **the quarry model:** a mesh of the excavated area;
+- **a hidden layer "Quarry Brep (simplified)":** each bench floor as a flat surface and the walls
+  as vertical surfaces. Use Join in Rhino if you want them as one polysurface.
+
 ## Plan linework (step 8)
 
 Step 8 writes `quarry_plan.dxf` (open it in Rhino with units set to Meters) with these layers:

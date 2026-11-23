@@ -221,7 +221,12 @@ def state():
         "zoom": (cfg.get("imagery") or {}).get("zoom", 17),
         "max_tiles": (cfg.get("imagery") or {}).get("max_tiles", 3000),
         "pit": pit,
+        "user_lines": t.get("user_lines") or "",
     }
+    ref = PROJECT / "data" / "reference"
+    s["user_line_files"] = sorted(f"data/reference/{p.name}" for p in ref.glob("*")
+                                  if p.suffix.lower() in (".3dm", ".dxf", ".geojson") and p.name != Path(PIT_FILE).name) \
+        if ref.exists() else []
     s["blender_detected"] = detect_blender()
     s["key"] = {"in_env": bool(os.environ.get("OPENTOPO_API_KEY")), "in_app": bool(JOB.api_key)}
     paths = current_paths(cfg)
@@ -352,6 +357,11 @@ def save_settings(data: dict) -> str | None:
             if not 2 <= v <= 40:
                 return "Bench height should be between 2 and 40 m."
             upd["terraces.bench_height_m"] = v
+    if "user_lines" in data:
+        ul = (data["user_lines"] or "").strip()
+        if ul and not (PROJECT / ul).exists():
+            return f"Bench lines file not found: {ul}"
+        upd["terraces.user_lines"] = ul or None
     if "terraces_enabled" in data:
         upd["terraces.enabled"] = bool(data["terraces_enabled"])
     if "pit" in data:

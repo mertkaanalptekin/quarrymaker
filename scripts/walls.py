@@ -243,3 +243,118 @@ def detail_ortho(root, utm_bounds, epsg: int, zoom: int, out_path, tile_url=None
     if log:
         log.info("Detail photo: zoom %d, %d tiles (%d downloaded), %.2f m pixels", zoom, nx * ny, got, res_m)
     return out_path
+
+
+def read_user_lines(path, origin, log=None):
+    """Bench edges drawn by the user (Rhino .3dm, .dxf or GeoJSON) as a list of
+    (N, 2) arrays in project CRS metres. Rhino/DXF coordinates are the local
+    model coordinates of the Quarry Maker exports (real = local + origin);
+    Rhino unit systems are converted to metres. All curves on visible layers
+    are used, or only those on a layer whose name contains 'bench' if any."""
+    from pathlib import Path
+    p = Path(path)
+    ox, oy = origin
+    out = []
+    if p.suffix.lower() == ".3dm":
+        import rhino3dm as r
+        m = r.File3dm.Read(str(p))
+        if m is None:
+            raise RuntimeError(f"cannot read {p}")
+        scale = {"Millimeters": 0.001, "Centimeters": 0.01, "Meters": 1.0, "Kilometers": 1000.0,
+                 "Inches": 0.0254, "Feet": 0.3048}.get(str(m.Settings.ModelUnitSystem).split(".")[-1], 1.0)
+        layers = [L.FullPath for L in m.Layers]
+        bench_layers = {i for i, n in enumerate(layers) if "bench" in n.lower()}
+        for o in m.Objects:
+            g = o.Geometry
+            li = o.Attributes.LayerIndex
+            if not isinstance(g, r.Curve) or (bench_layers and li not in bench_layers):
+                continue
+            if isinstance(g, r.PolylineCurve):
+                pts = np.array([(g.Point(i).X, g.Point(i).Y) for i in range(g.PointCount)])
+            else:
+                n = max(8, int(g.GetLength() * scale / 0.5)) if hasattr(g, "GetLength") else 200
+                ts = np.linspace(g.Domain.T0, g.Domain.T1, n)
+                pts = np.array([(g.PointAt(t).X, g.PointAt(t).Y) for t in ts])
+            out.append(pts * scale + np.array([ox, oy]))
+    elif p.suffix.lower() == ".dxf":
+        from linework import read_dxf_polylines
+        out = [a + np.array([ox, oy]) for a in read_dxf_polylines(p)]
+    else:
+        import json
+        gj = json.loads(p.read_text(encoding="utf-8"))
+        for f in gj.get("features", []):
+            gm = f["geometry"]
+            parts = gm["coordinates"] if gm["type"] == "MultiLineString" else [gm["coordinates"]]
+            out += [np.asarray(c, dtype="float64")[:, :2] for c in parts]
+    out = [a for a in out if len(a) >= 2]
+    if log:
+        tot = sum(float(np.hypot(*np.diff(a, axis=0).T).sum()) for a in out)
+        log.info("Your bench lines: %d curves, %.1f km (%s)", len(out), tot / 1000.0, p.name)
+    return out
+
+
+def rasterize_lines(lines, transform, shape):
+    """1-cell lines on the analysis grid, plus for every line cell the index of its polyline."""
+    from rasterio import features
+    from shapely.geometry import LineString
+    shapes = [(LineString(a), i + 1) for i, a in enumerate(lines)]
+    lab = features.rasterize(shapes, out_shape=shape, transform=transform, dtype="int32", all_touched=True)
+    return lab > 0, lab
+
+
+def line_low_sides(lines, transform, shape, band, z_smooth, res, side_m=6.0, log=None):
+    """For each polyline, which side is lower, decided for the whole line:
+    the dark wall band (shade + shadow) lies on the lower side when present,
+    otherwise the smoothed DEM decides. Returns a per-cell (low_c, low_r) unit
+    vector field on line cells (column = east, row = south) and stats."""
+    Hh, Ww = shape
+    lowc = np.zeros(shape)
+    lowr = np.zeros(shape)
+    inv = ~transform
+    n_band = n_dem = 0
+    for a in lines:
+        cc, rr = inv * (a[:, 0], a[:, 1])
+        cc, rr = np.asarray(cc), np.asarray(rr)
+        # resample along the line every ~res
+        seg = np.hypot(np.diff(cc), np.diff(rr))
+        s = np.r_[0, np.cumsum(seg)]
+        if s[-1] < 1:
+            continue
+        t = np.arange(0, s[-1], 0.5)
+        c = np.interp(t, s, cc)
+        r = np.interp(t, s, rr)
+        dc = np.gradient(c)
+        dr = np.gradient(r)
+        nrm = np.hypot(dc, dr) + 1e-9
+        # left normal (in column/row space)
+        nc, nr = -dr / nrm, dc / nrm
+        k = max(1, int(round(side_m / res)))
+        band_l = band_r = 0.0
+        for j in range(1, k + 1):
+            cl = np.clip(np.round(c + nc * j).astype(int), 0, Ww - 1)
+            rl = np.clip(np.round(r + nr * j).astype(int), 0, Hh - 1)
+            cr_ = np.clip(np.round(c - nc * j).astype(int), 0, Ww - 1)
+            rr_ = np.clip(np.round(r - nr * j).astype(int), 0, Hh - 1)
+            band_l += band[rl, cl].sum()
+            band_r += band[rr_, cr_].sum()
+        tot = band_l + band_r
+        if tot > 0.15 * len(t) and abs(band_l - band_r) > 0.4 * tot:
+            left_low = band_l > band_r
+            n_band += 1
+        else:
+            j = max(2, int(round(15.0 / res)))
+            cl = np.clip(np.round(c + nc * j).astype(int), 0, Ww - 1)
+            rl = np.clip(np.round(r + nr * j).astype(int), 0, Hh - 1)
+            cr_ = np.clip(np.round(c - nc * j).astype(int), 0, Ww - 1)
+            rr_ = np.clip(np.round(r - nr * j).astype(int), 0, Hh - 1)
+            left_low = float((z_smooth[rl, cl] - z_smooth[rr_, cr_]).sum()) < 0
+            n_dem += 1
+        sg = 1.0 if left_low else -1.0
+        ci = np.clip(np.round(c).astype(int), 0, Ww - 1)
+        ri = np.clip(np.round(r).astype(int), 0, Hh - 1)
+        lowc[ri, ci] = sg * nc
+        lowr[ri, ci] = sg * nr
+    if log:
+        log.info("Step direction of your lines: %d from wall shadows in the photo, %d from the terrain",
+                 n_band, n_dem)
+    return lowc, lowr, {"from_shadow_bands": n_band, "from_terrain": n_dem}

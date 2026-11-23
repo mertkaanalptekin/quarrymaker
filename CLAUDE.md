@@ -249,6 +249,18 @@ Calculates the quarry's benches from the satellite image with the help of the DE
     - regions between lines; counting lines uphill; a step per segment;
     - DEM-contour levels.
   - **Height from band width (not used):** shadow plus visible face width ∝ height, but the unknown view angle and the 0.5 m pixel make it too noisy (median band 1.5–2.5 m wide).
+  - **User-drawn bench lines (`terraces.user_lines`):** the user traced the bench edges in Rhino on top of the Quarry Maker model (top view, projected to CPlane) and chose the file in the app.
+    - Input: `.3dm` via rhino3dm (unit system converted; layers whose name contains "bench", else all curves), `.dxf`, or GeoJSON. Coordinates are local model coordinates (real = local + origin).
+    - Those lines are the **only** walls; no photo tracing is added.
+    - The quarry area is extended 30 m around them.
+    - Lower side **per whole line** (`walls.line_low_sides`): the side with the dark wall band (shade plus shadow) within 6 m, when clear; else the DEM smoothed at 30 m, 15 m out.
+    - Floors are **exactly flat**: one height per connected floor piece (`flat_exact`).
+    - Area B: 80% of line length on a wall, F1 0.27, against 74% and 0.23 with 80 m local flattening.
+    - Real site: 360 curves, 97 km.
+  - **Rhino output (`rhino_export.py`, `exchange/rhino/vNNN/terraced/quarry_terraced.3dm`, metres, local coords):**
+    - layers: your lines (2D); lines lifted to their wall tops (3D); the block mesh of the excavated area only;
+    - a **hidden** "Quarry Brep (simplified)" layer: each flat floor piece as a planar trimmed face (outline simplified 1.5 m) plus vertical planar wall faces where the ground outside drops > `mesh_wall_m`;
+    - the Breps are not joined (rhino3dm cannot join); Rhino's Join / MergeAllCoplanarFaces can do it.
   - **Labelling:** `bench_method` = 2 marks these cells, and they are drawn in `07_bench_lines.png`.
   - **Known limits:**
     - the overall depth follows the old DEM; parts dug deeper since are too shallow;
@@ -331,7 +343,11 @@ The user is an architect, not a programmer, so every feature must be reachable f
   - The user reports that the sun is in the southeast.
 - **Site research:** `docs/KOCABAS_SITE_RESEARCH.md` collects the geology and quarrying facts (Turkish and international sources): travertine, not metamorphic marble; benches usually 6–8 m (3.5–9.4 m), saw-cut faces 80–90°, ~3.8 m cutting lifts at a Kaklık quarry, blocks ~2.0×1.6×1.5 m; mined beds 5–25 m between marl/clay bands; N60°W and E–W faults/joints. It suggests a 7 m default bench height (not yet changed; the user decides).
 - **Stage 09 (expansion over time) is built**, using Esri Wayback (the user chose this).
-- **Possible:** bench heights from shadow widths (this needs the sun elevation); an "exclude area" drawing tool in the app (the factories are inside the auto quarry area).
+- **Possible:**
+  - bench heights from shadow widths (this needs the sun elevation);
+  - an "exclude area" drawing tool in the app (the factories are inside the auto quarry area);
+  - joined or closed Brep solids through a Rhino MCP on the user's machine.
+- **User-drawn lines (2026-11):** the user traced all bench edges in Rhino (`2211_quarrybenches.3dm`, cm units, layer "Quarry Benches"); step 7 builds the walls on them (see stage 07).
 - **Synthetic tests:** `tests/synthetic_quarry.py make|evaluate`. Simple: 89%. Complex pit B with carved benches (default 9 m vs true 10 m): 52% against 63% for the plain DEM (documented limit).
 - **Carved benches (latest):**
   - The user found the DEM-drop steps too shallow, then DEM-contour walls inconsistent with the photo, then results "sometimes arbitrary".

@@ -182,6 +182,15 @@
       <label style="display:block; margin-top:8px"><input type="checkbox" id="terraces-on"> Calculate the benches (step 7)</label>
     </div>
 
+    <div class="field">
+      <div class="label">Your bench lines (optional)</div>
+      <div class="help" style="margin-top:0">If you drew the bench edges yourself in Rhino (on top of the Quarry Maker model,
+        without moving it), put the file (.3dm or .dxf) into the <b>data/reference</b> folder, then choose it here.
+        Step 7 then builds a wall exactly on every line you drew, with flat bench floors between them.
+        Lines on a layer whose name contains "bench" are used (or all lines if there is no such layer).</div>
+      <select id="user-lines" style="margin-top:6px; max-width:100%"></select>
+    </div>
+
     <div class="row">
       <button class="primary" id="save-settings">Save settings</button>
       <span id="settings-msg" class="msg"></span>
@@ -362,6 +371,10 @@ function renderConfig() {
     const auto = bh == null || String(bh).toLowerCase() === "auto";
     $("bh-auto").checked = auto; $("bh-known").checked = !auto; $("bh-value").value = auto ? "" : bh;
     $("terraces-on").checked = c.terraces_enabled !== false;
+    const ul = $("user-lines"); ul.innerHTML = "";
+    const opt0 = document.createElement("option"); opt0.value = ""; opt0.textContent = "None (trace the benches from the photo)"; ul.appendChild(opt0);
+    for (const f of (S.user_line_files || [])) { const o = document.createElement("option"); o.value = f; o.textContent = f; ul.appendChild(o); }
+    ul.value = c.user_lines || "";
   }
   const k = S.key;
   $("key-status").innerHTML = k.in_app ? '<span class="key-ok">&#10003; Key is set for this session.</span>'
@@ -491,7 +504,7 @@ $("save-area").onclick = async () => {
 };
 $("blender-select").onchange = () => { dirtySettings = true; $("blender-path").style.display = $("blender-select").value === "__other" ? "" : "none"; };
 for (const id of ["blender-path", "bh-value"]) $(id).addEventListener("input", () => { dirtySettings = true; if (id === "bh-value") $("bh-known").checked = true; });
-for (const id of ["bh-auto", "bh-known", "terraces-on"]) $(id).addEventListener("change", () => { dirtySettings = true; });
+for (const id of ["bh-auto", "bh-known", "terraces-on", "user-lines"]) $(id).addEventListener("change", () => { dirtySettings = true; });
 $("use-key").onclick = async () => {
   const j = await api("/api/settings", { api_key: $("api-key").value });
   $("api-key").value = "";
@@ -501,7 +514,8 @@ $("save-settings").onclick = async () => {
   const sel = $("blender-select").value;
   const body = { blender_path: sel === "__other" ? $("blender-path").value : sel,
                  bench_height_m: $("bh-auto").checked ? "auto" : $("bh-value").value,
-                 terraces_enabled: $("terraces-on").checked };
+                 terraces_enabled: $("terraces-on").checked,
+                 user_lines: $("user-lines").value };
   if ($("api-key").value) body.api_key = $("api-key").value;
   const j = await api("/api/settings", body);
   $("api-key").value = "";

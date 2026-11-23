@@ -878,13 +878,15 @@ def _cg(apply_A, b, x0, diag, iters=800, tol=1e-5):
 
 def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, field_m=30.0,
                   reach_m=20.0, max_spacing_m=60.0, snap_m=10.0, dir_m=60.0, base_m=60.0,
-                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=100.0, carve_smooth_m=150.0):
+                  feather_m=20.0, carve=0.5, flat_m=30.0, band=None, sun_az=None, relief_m=300.0, snap_w=100.0, carve_smooth_m=150.0,
+                  low_dir=None, flat_exact=False):
     """Benches laid out by the photo's bench lines (not by the DEM's contours).
 
     band / sun_az: dark wall bands (walls facing away from the sun, with their
     shadows) and the sun azimuth. On these walls the lower side is the side
     away from the sun: the step direction comes from the photo, not from the
-    old DEM. relief_m: relief at scales shorter than this comes from counting
+    old DEM. low_dir: (col, row) unit vectors toward the lower side on line
+    cells, decided per whole line for lines drawn by the user. relief_m: relief at scales shorter than this comes from counting
     benches (H per bench); the DEM only gives the shape at longer scales
     (0 = the bench system is squeezed into the DEM's relief, lower walls). Ground the steps would
     raise above the measured surface is lowered by a correction smoothed over carve_smooth_m
@@ -937,6 +939,13 @@ def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, fiel
         sun_c, sun_r = math.sin(math.radians(sun_az)), -math.cos(math.radians(sun_az))
         sg_sun = -np.sign(nx * sun_c + ny * sun_r)
         sg = np.where(bnd & (sg_sun != 0), sg_sun, sg)
+    if low_dir is not None:
+        # lines drawn by the user: the lower side was decided once per whole line
+        lc_, lr_ = low_dir[0][sl], low_dir[1][sl]
+        lc_ = gauss(lc_, 1.0) / np.maximum(gauss((lc_ != 0) | (lr_ != 0), 1.0), 1e-9)
+        lr_ = gauss(lr_, 1.0) / np.maximum(gauss((low_dir[0][sl] != 0) | (lr_ != 0), 1.0), 1e-9)
+        sg_u = np.sign(nx * lc_ + ny * lr_)
+        sg = np.where(sg_u != 0, sg_u, sg)
     nx, ny = nx * sg, ny * sg                         # downhill normal
     rr, cc = np.nonzero(sk)
     gap = np.full(rr.size, np.nan)
@@ -1041,7 +1050,19 @@ def photo_benches(z0, lines, within, res, bench_h=7.0, face_angle_deg=85.0, fiel
             sub = (slice(max(0, rr_[0] - pd_), rr_[-1] + 1 + pd_), slice(max(0, cc_[0] - pd_), cc_[-1] + 1 + pd_))
             ms = m[sub].astype(float)
             vals = zt[sub]
-            avg = gauss(vals * ms, sg_) / np.maximum(gauss(ms, sg_), 1e-9)
+            if flat_exact:
+                # one height per floor piece (connected, same level): exactly flat bench tops
+                from rasterio.transform import Affine
+                labs, _ = label_components(ms > 0, Affine.identity())
+                k_ = int(labs.max())
+                if k_:
+                    cnt_ = np.bincount(labs.ravel(), minlength=k_ + 1)
+                    med = np.bincount(labs.ravel(), weights=vals.ravel(), minlength=k_ + 1) / np.maximum(cnt_, 1)
+                    avg = med[labs]
+                else:
+                    avg = vals
+            else:
+                avg = gauss(vals * ms, sg_) / np.maximum(gauss(ms, sg_), 1e-9)
             zt[sub] = np.where(ms > 0, avg, vals)
     # where the photo shows no benches keep the measured ground (smooth hand-over)
     zt = pres * zt + (1 - pres) * (zc - carve * H * pres)

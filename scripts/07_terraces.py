@@ -50,6 +50,7 @@ DEFAULTS = {
     "pit_min_local_relief_m": 3.0,
     "feather_m": 8.0,
     "margin_m": 150.0,              # mesh extent = pit bbox + margin
+    "user_lines": None,              # bench edges drawn in Rhino (.3dm/.dxf/.geojson, local model coords); used as the walls
     "mesh_style": "blocks",          # blocks = flat tiles + truly vertical walls | smooth = height grid
     "mesh_wall_m": 2.5,             # neighbouring cells further apart than this get a vertical wall
     "mesh_max_vertices": 8000000,  # full 2 m detail on a ~3 x 4 km quarry (7.1 M on the real site)
@@ -391,10 +392,28 @@ def main(argv=None) -> int:
             within_tr &= T.bare_ground(rgb, res, mask)
         sun = sun_geometry(cfg, tc, mask, tf, crs, paths, log)
         detail_tif = detail_photo(cfg, tc, mask, tf, crs, paths, log) or ortho_tif
-        log.info("Tracing bench lines in the photo at full resolution ...")
-        lines = T.bench_lines_from_file(detail_tif, tf, (H, W), crs, within_tr,
-                                        min_len_m=float(tc["line_min_length_m"]),
-                                        sun_azimuth_deg=sun["azimuth_deg"], log=log)
+        user_lines = None
+        if tc.get("user_lines"):
+            up = Path(tc["user_lines"])
+            up = up if up.is_absolute() else paths.root / up
+            if not up.exists():
+                raise common.PipelineError(f"terraces.user_lines not found: {up}. Put your Rhino bench lines file "
+                                           "into data/reference/ and choose it again in the app (step 2).")
+            user_lines = WL.read_user_lines(up, (meta["origin_x"], meta["origin_y"]), log=log)
+        if user_lines:
+            lines, _ = WL.rasterize_lines(user_lines, tf, (H, W))
+            # benches wherever you drew them, also outside the automatic quarry area
+            near_user = T.box_blur(lines.astype(float), max(1, int(round(30.0 / res)))) > 0
+            within_tr = within_tr | near_user
+            mask = mask | near_user
+            feather = T.smoothstep(T.gauss(mask.astype(float), float(tc["feather_m"]) / res), 0.5, 0.95)
+            log.info("Using your %d bench lines as the walls (%.1f km on the grid)", len(user_lines),
+                     lines.sum() * res / 1000.0)
+        else:
+            log.info("Tracing bench lines in the photo at full resolution ...")
+            lines = T.bench_lines_from_file(detail_tif, tf, (H, W), crs, within_tr,
+                                            min_len_m=float(tc["line_min_length_m"]),
+                                            sun_azimuth_deg=sun["azimuth_deg"], log=log)
         log.info("Cutting benches along %.1f km of bench lines ...", lines.sum() * res / 1000.0)
         style = str(tc.get("bench_style", "carved")).lower()
         band_lines = None
@@ -405,19 +424,29 @@ def main(argv=None) -> int:
             sat_ = x_.max(-1) - x_.min(-1)
             slope_ = np.degrees(np.arctan(np.hypot(*np.gradient(T.gauss(z0, 5.0 / res), res))))
             excl = lw.road_mask(lum_, sat_, slope_, res) | lw.yard_mask(lum_, mask, slope_, res)
-            n_before = int(lines.sum())
-            lines = lines & ~excl
-            log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
+            if not user_lines:
+                n_before = int(lines.sum())
+                lines = lines & ~excl
+                log.info("Left out %.1f km of lines on roads and block yards", (n_before - lines.sum()) * res / 1000.0)
             log.info("Finding wall bands (walls in shade and their shadows) in the photo ...")
             band = WL.bands_from_file(detail_tif, tf, (H, W), crs, mask, log=log) & ~excl
             band_lines = WL.wall_lines_from_bands(band, res)
             log.info("Wall bands: %.1f km of walls facing away from the sun", band_lines.sum() * res / 1000.0)
-            lines = lines | (band_lines & within_tr)
             Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
-            dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
-                                          face_angle_deg=float(tc["wall_angle_deg"]),
-                                          flat_m=float(tc.get("flat_floor_m", 30.0)),
-                                          band=band, sun_az=sun["azimuth_deg"])
+            if user_lines:
+                lowc, lowr, sides = WL.line_low_sides(user_lines, tf, (H, W), band, T.gauss(z0, 30.0 / res), res,
+                                                      log=log)
+                dz_l, linfo = T.photo_benches(z0, lines, within_tr, res, Hc,
+                                              face_angle_deg=float(tc["wall_angle_deg"]),
+                                              flat_m=max(80.0, float(tc.get("flat_floor_m", 30.0))),
+                                              flat_exact=True, low_dir=(lowc, lowr))
+                linfo["user_lines"] = {"file": str(tc["user_lines"]), "curves": len(user_lines), **sides}
+            else:
+                lines = lines | (band_lines & within_tr)
+                dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
+                                              face_angle_deg=float(tc["wall_angle_deg"]),
+                                              flat_m=float(tc.get("flat_floor_m", 30.0)),
+                                              band=band, sun_az=sun["azimuth_deg"])
             linfo["sun"] = sun
             linfo["detail_photo"] = str(detail_tif)
             linfo["wall_band_km"] = round(float(band_lines.sum()) * res / 1000.0, 1)
@@ -439,6 +468,7 @@ def main(argv=None) -> int:
         gz = np.hypot(*np.gradient(zt, res))
         trc = {"lines": lines, "info": linfo, "affected": affected, "dz": weight_l * dz_l,
                "band_lines": band_lines if style == "carved" else None,
+               "user_lines_xy": user_lines,
                "face": affected & lines & (gz > 0.5), "weight": weight_l * affected}
         if style == "carved":
             log.info("Benches carved along the photo's bench lines: %.1f ha changed", affected.sum() * res * res / 1e4)
@@ -621,6 +651,23 @@ def main(argv=None) -> int:
         sun_ = trc["info"]["sun"]
         params["photo_agreement"], shadow_img = shadow_check(paths, rgb, mask, z0, zt, trc["band_lines"], sun_,
                                                              res, log)
+    # Rhino file: your lines, the lines in 3D, the interpreted mesh and (hidden) simplified Breps
+    if trc is not None:
+        try:
+            import rhino_export as RX
+            exc = (trc["dz"] < -0.25) | trc["affected"]
+            if trc.get("user_lines_xy"):
+                exc |= T.box_blur(trc["lines"].astype(float), max(1, int(round(10.0 / res)))) > 0
+            exc = T.box_blur(exc.astype(float), 2) > 0.3
+            rh = paths.rhino / "terraced" / "quarry_terraced.3dm"
+            params["rhino_3dm"] = {"file": str(rh.relative_to(paths.root)),
+                                   **RX.write_quarry_3dm(rh, zt, tf, exc, (meta["origin_x"], meta["origin_y"]),
+                                                         meta["crs"], float(Hb), trc.get("user_lines_xy"),
+                                                         wall_m=float(tc.get("mesh_wall_m", 2.5)), log=log)}
+        except ImportError:
+            log.warning("rhino3dm is not installed; no .3dm file (pip install rhino3dm).")
+        except Exception as ex:   # the .3dm is an extra; never fail the stage for it
+            log.warning("Rhino .3dm export failed: %s", ex)
     params_p = od / "terraces_params.json"
     common.write_json(params_p, params)
     files.append(params_p)

@@ -44,6 +44,7 @@ terraces:               # stage 07 - INTERPRETED benches from imagery + DEM (bas
   surface_smoothing_m: 20
   local_window_m: 30        # window for the local DEM correction to the bench levels
   pit_mask: null            # optional GeoJSON polygon of the pit (lon/lat or project CRS)
+  user_lines: null          # bench edges you drew in Rhino (e.g. data/reference/quarry_benches.3dm); walls are built exactly on them
   pit_threshold: null       # optional fixed imagery threshold if auto-detection fails
   pit_min_area_m2: 20000
   pit_min_local_relief_m: 3
