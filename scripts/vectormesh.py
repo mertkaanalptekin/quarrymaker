@@ -243,12 +243,9 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
     exact level, so each floor between two lines is perfectly flat.
     low_left[i]: True when the lower floor is on the left of line i (drawing direction).
     Returns dict(high, low, groups, n_links)."""
-    from shapely.geometry import LineString, Point
-    from shapely.strtree import STRtree
+    from shapely.geometry import LineString
 
     n = len(lines)
-    geoms = [LineString(a) for a in lines]
-    tree = STRtree(geoms)
     H = float(bench_h)
     rows, rhs, wts = [], [], []
     pair = {}
@@ -257,6 +254,20 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
         # 2*i = high side, 2*i+1 = low side
         return 2 * i + (1 if (left == bool(low_left[i])) else 0)
 
+    # which line does a ray meet first? marched over a 1 m map of line ids (topology only;
+    # the geometry stays vector)
+    from rasterio import features
+    from rasterio.transform import from_origin
+    allp = np.concatenate(lines)
+    gx0, gy0 = allp.min(0) - reach_m - 2
+    gx1, gy1 = allp.max(0) + reach_m + 2
+    gres = 1.0
+    gW, gH = int(np.ceil((gx1 - gx0) / gres)), int(np.ceil((gy1 - gy0) / gres))
+    gtf = from_origin(gx0, gy1, gres, gres)
+    lab = features.rasterize([(LineString(a), i + 1) for i, a in enumerate(lines) if len(a) >= 2],
+                             out_shape=(gH, gW), transform=gtf, all_touched=True, dtype="int32")
+    dens = [_densify(a, 1.0) for a in lines]
+    O, D, I, S = [], [], [], []
     for i, a in enumerate(lines):
         p = _densify(a, step_m)
         if len(p) < 2:
@@ -266,39 +277,39 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
         nl = np.c_[-t[:, 1], t[:, 0]]
         zl = float(np.mean(sample(z0, transform, *p.T)))
         L = float(np.hypot(*np.diff(a, axis=0).T).sum())
-        # wall and anchor
         rows.append({2 * i: 1.0, 2 * i + 1: -1.0}); rhs.append(H); wts.append(wall_w * L)
         rows.append({2 * i: 0.5, 2 * i + 1: 0.5}); rhs.append(zl - carve * H); wts.append(anchor_w * L)
         for side in (1.0, -1.0):
-            for k in range(len(p)):
-                o = p[k] + nl[k] * side * 0.05
-                e = p[k] + nl[k] * side * reach_m
-                ray = LineString([o, e])
-                best = None
-                for j in tree.query(ray):
-                    if j == i:
-                        continue
-                    x = ray.intersection(geoms[j])
-                    if x.is_empty:
-                        continue
-                    pts = [x] if x.geom_type == "Point" else [g for g in getattr(x, "geoms", []) if g.geom_type == "Point"]
-                    for q in pts:
-                        d = Point(o).distance(q)
-                        if best is None or d < best[0]:
-                            best = (d, j, np.asarray(q.coords[0]))
-                if best is None:
-                    continue
-                _, j, q = best
-                # which side of line j does the ray come from?
-                bj = lines[j]
-                kk = int(np.argmin(np.hypot(*(bj - q).T)))
-                tj = bj[min(kk + 1, len(bj) - 1)] - bj[max(kk - 1, 0)]
-                nj = np.array([-tj[1], tj[0]])
-                from_left = float(np.dot(o - q, nj)) > 0
-                a_ = node(i, side > 0)
-                b_ = node(j, from_left)
-                key = (min(a_, b_), max(a_, b_))
-                pair[key] = pair.get(key, 0) + 1
+            O.append(p); D.append(nl * side); I.append(np.full(len(p), i)); S.append(np.full(len(p), side))
+    O, D, I, S = np.concatenate(O), np.concatenate(D), np.concatenate(I), np.concatenate(S)
+    hit = np.zeros(len(O), "int64")
+    hitd = np.zeros(len(O))
+    alive = np.ones(len(O), bool)
+    for k in np.arange(1.5, reach_m, 0.5):
+        q = O + D * k
+        c = ((q[:, 0] - gx0) / gres).astype(int)
+        r = ((gy1 - q[:, 1]) / gres).astype(int)
+        ok = alive & (c >= 0) & (c < gW) & (r >= 0) & (r < gH)
+        v = np.zeros(len(O), "int64")
+        v[ok] = lab[r[ok], c[ok]]
+        new = ok & (v > 0) & (v - 1 != I)
+        hit[new] = v[new] - 1
+        hitd[new] = k
+        alive &= ~new
+    sel = np.nonzero(hitd > 0)[0]
+    for idx in sel:
+        i, j = int(I[idx]), int(hit[idx])
+        o = O[idx]
+        q = O[idx] + D[idx] * hitd[idx]
+        bj = dens[j]
+        kk = int(np.argmin(np.hypot(*(bj - q).T)))
+        tj = bj[min(kk + 1, len(bj) - 1)] - bj[max(kk - 1, 0)]
+        nj = np.array([-tj[1], tj[0]])
+        from_left = float(np.dot(o - bj[kk], nj)) > 0
+        a_ = node(i, S[idx] > 0)
+        b_ = node(j, from_left)
+        key = (min(a_, b_), max(a_, b_))
+        pair[key] = pair.get(key, 0) + 1
     for (a_, b_), c in pair.items():
         rows.append({a_: 1.0, b_: -1.0}); rhs.append(0.0); wts.append(float(c) * step_m)
     # weighted least squares (dense: 2 unknowns per line)
