@@ -393,6 +393,7 @@ def main(argv=None) -> int:
         sun = sun_geometry(cfg, tc, mask, tf, crs, paths, log)
         detail_tif = detail_photo(cfg, tc, mask, tf, crs, paths, log) or ortho_tif
         user_lines = None
+        vec = None
         if tc.get("user_lines"):
             up = Path(tc["user_lines"])
             up = up if up.is_absolute() else paths.root / up
@@ -434,13 +435,28 @@ def main(argv=None) -> int:
             log.info("Wall bands: %.1f km of walls facing away from the sun", band_lines.sum() * res / 1000.0)
             Hc = fixed_h if fixed_h is not None else float(tc["carve_bench_height_m"])
             if user_lines:
-                lowc, lowr, sides = WL.line_low_sides(user_lines, tf, (H, W), band, T.gauss(z0, 30.0 / res), res,
-                                                      log=log)
-                dz_l, linfo = T.photo_benches(z0, lines, within_tr, res, Hc,
-                                              face_angle_deg=float(tc["wall_angle_deg"]),
-                                              flat_m=max(80.0, float(tc.get("flat_floor_m", 30.0))),
-                                              flat_exact=True, low_dir=(lowc, lowr))
-                linfo["user_lines"] = {"file": str(tc["user_lines"]), "curves": len(user_lines), **sides}
+                import vectormesh as VM
+                _, _, sides = WL.line_low_sides(user_lines, tf, (H, W), band, T.gauss(z0, 30.0 / res), res, log=log)
+                # vector model: every bench edge is level; floors between lines are shared and exactly flat
+                lev = VM.line_levels(user_lines, sides["low_on_left"], z0, tf, Hc, log=log)
+                tin = VM.tin_from_levels(user_lines, sides["low_on_left"], lev, z0, tf, log=log)
+                from rasterio import features as _ft
+                from shapely.geometry import LineString as _LS
+                zone = _ft.rasterize([(_LS(a).buffer(40.0), 1) for a in user_lines if len(a) >= 2],
+                                     out_shape=(H, W), transform=tf).astype(bool)
+                zt_vec = VM.raster_from_tin(tin, tf, (H, W), zone, z0)
+                dz_l = (zt_vec - z0).astype("float32")
+                walls_h = lev["high"] - lev["low"]
+                linfo = {"bench_height_m": Hc, "style": "vector",
+                         "line_length_km": round(sum(float(np.hypot(*np.diff(a, axis=0).T).sum())
+                                                     for a in user_lines) / 1000.0, 1),
+                         "wall_height_median_m": round(float(np.median(walls_h)), 2),
+                         "floor_links": lev["n_links"], "shared_floors": int(len(np.unique(lev["groups"]))),
+                         "tin_vertices": int(len(tin["verts"])), "tin_triangles": int(len(tin["tris"])),
+                         "mean_dz_m": round(float(dz_l[zone].mean()), 2)}
+                linfo["user_lines"] = {"file": str(tc["user_lines"]), "curves": len(user_lines),
+                                       **{k: v for k, v in sides.items() if k != "low_on_left"}}
+                vec = {"tin": tin, "levels": lev, "low_on_left": sides["low_on_left"], "zone": zone}
             else:
                 lines = lines | (band_lines & within_tr)
                 dz_l, linfo = T.photo_benches(z0, lines, within_tr | (mask & (evidence <= 0.5)), res, Hc,
@@ -463,12 +479,14 @@ def main(argv=None) -> int:
                                         dz_max=float(tc["max_cut_m"]), transform=tf)
         linfo["style"] = style
         weight_l = feather * (mask & (evidence <= 0.5))
+        if vec is not None:
+            weight_l = vec["zone"].astype("float64")      # the vector model holds the whole benched zone
         zt = zt + weight_l * dz_l
         affected = (np.abs(dz_l) > 0.25) & (weight_l > 0.5)
         gz = np.hypot(*np.gradient(zt, res))
         trc = {"lines": lines, "info": linfo, "affected": affected, "dz": weight_l * dz_l,
                "band_lines": band_lines if style == "carved" else None,
-               "user_lines_xy": user_lines,
+               "user_lines_xy": user_lines, "vector": vec,
                "face": affected & lines & (gz > 0.5), "weight": weight_l * affected}
         if style == "carved":
             log.info("Benches carved along the photo's bench lines: %.1f ha changed", affected.sum() * res * res / 1e4)
@@ -660,10 +678,25 @@ def main(argv=None) -> int:
                 exc |= T.box_blur(trc["lines"].astype(float), max(1, int(round(10.0 / res)))) > 0
             exc = T.box_blur(exc.astype(float), 2) > 0.3
             rh = paths.rhino / "terraced" / "quarry_terraced.3dm"
-            params["rhino_3dm"] = {"file": str(rh.relative_to(paths.root)),
-                                   **RX.write_quarry_3dm(rh, zt, tf, exc, (meta["origin_x"], meta["origin_y"]),
-                                                         meta["crs"], float(Hb), trc.get("user_lines_xy"),
-                                                         wall_m=float(tc.get("mesh_wall_m", 2.5)), log=log)}
+            if trc.get("vector") is not None:
+                import vectormesh as VM
+                v = trc["vector"]
+                zone = v["zone"]
+                inv_tf = ~tf
+
+                def in_zone(x, y):
+                    c_, r_ = inv_tf * (x, y)
+                    c_ = np.clip(np.asarray(c_).astype(int), 0, W - 1)
+                    r_ = np.clip(np.asarray(r_).astype(int), 0, H - 1)
+                    return zone[r_, c_]
+                floors = VM.floor_polygons(v["tin"]["verts"], v["tin"]["tris"], inside_fn=in_zone)
+                info3 = RX.write_vector_3dm(rh, v["tin"], floors, trc["user_lines_xy"], v["levels"], v["low_on_left"],
+                                            (meta["origin_x"], meta["origin_y"]), meta["crs"], float(Hb), log=log)
+            else:
+                info3 = RX.write_quarry_3dm(rh, zt, tf, exc, (meta["origin_x"], meta["origin_y"]), meta["crs"],
+                                            float(Hb), trc.get("user_lines_xy"),
+                                            wall_m=float(tc.get("mesh_wall_m", 2.5)), log=log)
+            params["rhino_3dm"] = {"file": str(rh.relative_to(paths.root)), **info3}
         except ImportError:
             log.warning("rhino3dm is not installed; no .3dm file (pip install rhino3dm).")
         except Exception as ex:   # the .3dm is an extra; never fail the stage for it
@@ -682,6 +715,10 @@ def main(argv=None) -> int:
     if not blender:
         raise common.PipelineError("Blender path is not set (config blender.path or BLENDER_PATH).")
     rhino_t = paths.rhino / "terraced"
+    tin_p = None
+    if trc is not None and trc.get("vector") is not None:
+        tin_p = od / "terrain_tin.npz"          # vector model (CRS coordinates) for the Blender mesh
+        np.savez_compressed(tin_p, verts=trc["vector"]["tin"]["verts"], tris=trc["vector"]["tin"]["tris"])
     job = {
         "run_id": paths.run_id, "log_file": str(paths.log_file),
         "meta": str(paths.base / "meta.json"), "params": str(params_p),
@@ -692,6 +729,7 @@ def main(argv=None) -> int:
         "rhino_dir": str(rhino_t), "checks_dir": str(paths.checks),
         "formats": [f.lower() for f in ((cfg.get("rhino") or {}).get("formats") or ["obj"])],
         "result": str(paths.checks / "blender_07_result.json"),
+        "tin": str(tin_p) if tin_p else None,
     }
     job_path = paths.checks / "blender_job_07.json"
     common.write_json(job_path, job)
@@ -729,9 +767,14 @@ def main(argv=None) -> int:
               and abs(g.get("crs y", 1e18) - oy) < 1e-6)
     checks.append(("Terrace .blend georef equals base meta.json", ok_geo,
                    f"SRID={g.get('SRID')}, crs x={g.get('crs x')}, crs y={g.get('crs y')}"))
-    pz = np.load(patch)["z"]
+    if tin_p is not None:
+        pz = trc["vector"]["tin"]["verts"][:, 2]
+    else:
+        pz = np.load(patch)["z"]
     dzr = max(abs(br["patch_bbox"][2] - float(pz.min())), abs(br["patch_bbox"][5] - float(pz.max())))
-    if str(tc.get("mesh_style", "blocks")).lower() == "blocks":
+    if tin_p is not None:
+        checks.append(("Vector mesh Z range equals the vector model", dzr <= 0.01, f"max diff {dzr:.4f} m"))
+    elif str(tc.get("mesh_style", "blocks")).lower() == "blocks":
         # block mesh corners are averages of the cells that meet there (within mesh_wall_m)
         tol_z = float(tc.get("mesh_wall_m", 2.5))
         checks.append(("Terraced block mesh Z range matches the interpreted raster (corner averaging)",
@@ -741,6 +784,10 @@ def main(argv=None) -> int:
     pb = params["patch"]
     half = res * stride / 2 + 1e-3
     exp = [pb["xmin"] - ox + half, pb["ymin"] - oy + half, pb["xmax"] - ox - half, pb["ymax"] - oy - half]
+    if tin_p is not None:          # the vector mesh covers the whole site
+        tv = trc["vector"]["tin"]["verts"]
+        exp = [float(tv[:, 0].min()) - ox, float(tv[:, 1].min()) - oy, float(tv[:, 0].max()) - ox,
+               float(tv[:, 1].max()) - oy]
     got = [br["patch_bbox"][0], br["patch_bbox"][1], br["patch_bbox"][3], br["patch_bbox"][4]]
     dxy = max(abs(a - b) for a, b in zip(exp, got))
     checks.append(("Terraced mesh sits at the right place (bbox)", dxy <= res * stride,

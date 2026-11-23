@@ -127,7 +127,35 @@ def build_scene(job, meta, prm, ext, origin, r, log):
 
     # --- interpreted patch ---
     style = str(prm.get("settings", {}).get("mesh_style", "blocks")).lower()
-    if style == "blocks":
+    if job.get("tin"):
+        style = "tin"
+    if style == "tin":
+        # vector model built on the user's bench lines: whole site, exact walls, flat floors
+        tv = np.load(job["tin"])
+        V = tv["verts"].astype("float64")
+        Tr = tv["tris"].astype("int32")
+        me = bpy.data.meshes.new("TERRAIN_terraced")
+        co = np.c_[V[:, 0] - origin[0], V[:, 1] - origin[1], V[:, 2]].astype("float32")
+        me.vertices.add(len(co))
+        me.vertices.foreach_set("co", co.reshape(-1))
+        nf = len(Tr)
+        me.loops.add(nf * 3)
+        me.loops.foreach_set("vertex_index", Tr.reshape(-1))
+        me.polygons.add(nf)
+        me.polygons.foreach_set("loop_start", np.arange(0, nf * 3, 3, dtype="int32"))
+        try:
+            me.polygons.foreach_set("loop_total", np.full(nf, 3, dtype="int32"))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        me.update(calc_edges=True)
+        me.validate(verbose=False)
+        lv = Tr.reshape(-1)
+        U = (V[lv, 0] - ext["xmin"]) / (ext["xmax"] - ext["xmin"])
+        Vv = (V[lv, 1] - ext["ymin"]) / (ext["ymax"] - ext["ymin"])
+        me.uv_layers.new(name="UVMap").data.foreach_set("uv", np.c_[U, Vv].reshape(-1).astype("float32"))
+        log.info("Vector mesh: %d vertices, %d triangles (whole site)", len(co), nf)
+        attr = None
+    elif style == "blocks":
         # flat tiles with truly vertical walls where neighbours differ by more than wall_m
         wall_m = float(prm.get("settings", {}).get("mesh_wall_m", 2.5))
         me, fc = bl.block_mesh("TERRAIN_terraced", z, xs, ys, ext, origin, wall_m=wall_m)
@@ -137,11 +165,12 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     else:
         me = bl.grid_mesh("TERRAIN_terraced", z, xs, ys, ext, origin)
         attr = lambda n, v, k="FLOAT": bl.add_point_attribute(me, n, v, k)  # noqa: E731
-    attr("confidence", data["confidence"])
-    attr("terrace_class", data["classes"], "INT")
-    attr("terrace_class_f", data["classes"].astype("float32") / 5.0)
-    attr("dz_interp", data["dz"])
-    if "method" in data.files:
+    if attr is not None:
+        attr("confidence", data["confidence"])
+        attr("terrace_class", data["classes"], "INT")
+        attr("terrace_class_f", data["classes"].astype("float32") / 5.0)
+        attr("dz_interp", data["dz"])
+    if attr is not None and "method" in data.files:
         # 0 none, 1 benches confirmed by elevation data, 2 traced from the photo (illustrative)
         attr("bench_method", data["method"], "INT")
         attr("bench_method_f", data["method"].astype("float32") / 2.0)
@@ -162,7 +191,13 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     terr["bench_floor_levels_m"] = [float(v) for v in prm["bench_floor_levels_m"]]
     terr["run_id"] = prm["run_id"]
 
-    # --- measured context with a hole under the patch ---
+    # --- measured context with a hole under the patch (not needed when the vector mesh covers the site) ---
+    if style == "tin":
+        ccoll = bpy.data.collections.new("00_base_context")
+        bpy.context.scene.collection.children.link(ccoll)
+        bl.add_origin_marker(ccoll, meta, max(50.0, r * 3))
+        _finish_scene(job, meta, prm, pa, origin, coll, z, res, s, w, h, log)
+        return
     dem = np.load(job["dem_npy"]).astype("float64")
     H, W = dem.shape
     cx_abs = ext["xmin"] + (np.arange(W) + 0.5) * r
@@ -180,6 +215,11 @@ def build_scene(job, meta, prm, ext, origin, r, log):
     ccoll.objects.link(ctx)
     bl.add_origin_marker(ccoll, meta, max(50.0, r * 3))
 
+    _finish_scene(job, meta, prm, pa, origin, coll, z, res, s, w, h, log)
+    log.info("Built TERRAIN_terraced %dx%d and context mesh", h, w)
+
+
+def _finish_scene(job, meta, prm, pa, origin, coll, z, res, s, w, h, log):
     # --- pit outline curves ---
     gj = json.loads(Path(job["outline"]).read_text(encoding="utf-8"))
     zfull = z
@@ -211,7 +251,6 @@ def build_scene(job, meta, prm, ext, origin, r, log):
                                  top_name="CAM_terraces_top", obl_name="CAM_terraces_oblique")
     bpy.context.scene.camera = obl
     bl.setup_world_and_render(dist * 4)
-    log.info("Built TERRAIN_terraced %dx%d and context mesh", h, w)
 
 
 def main():

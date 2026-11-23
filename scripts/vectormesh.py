@@ -346,44 +346,77 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
 
 
 def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_step_m=1.0, zone_m=40.0,
-                    coarse_m=10.0, log=None):
+                    coarse_m=10.0, fill_m=4.0, clear_m=1.5, blend_from_m=18.0, log=None):
     """TIN of the whole site: crest and toe strings of every line at its constant
     levels (exact positions of the drawn lines), measured terrain grid points
-    more than zone_m away from any line, and the site border."""
+    more than zone_m away from any line, and the site border.
+
+    The breakline network is cleaned before the constrained triangulation:
+    strings simplified to 10 cm, snapped to a 5 cm grid and noded; the few
+    segments that still cross or overlap another one (where lines cross) are
+    left out of the constraints. Heights come from the nearest original string
+    point. Coordinates are shifted to the grid's corner for numerical safety."""
+    import shapely
     import triangle
     from rasterio import features
     from shapely.geometry import LineString
     from shapely.ops import unary_union
+    from shapely.strtree import STRtree
 
     H_, W_ = z0.shape
     res = transform.a
     x0, y1 = transform.c, transform.f
     x1, y0 = x0 + W_ * res, y1 - H_ * res
-    seg3 = []
+    off = np.array([x0, y0])
+    strings, pz = [], []
     for i, a in enumerate(lines):
-        p = _densify(a, string_step_m)
+        p = _densify(a - off, string_step_m)
         if len(p) < 2:
             continue
         t = np.gradient(p, axis=0)
         t /= np.hypot(t[:, 0], t[:, 1])[:, None] + 1e-12
         nl = np.c_[-t[:, 1], t[:, 0]]
         sl = 1.0 if low_left[i] else -1.0                 # direction of the low side
-        hi = p - nl * sl * gap_m
-        lo = p + nl * sl * gap_m
-        for q, z in ((hi, levels["high"][i]), (lo, levels["low"][i])):
-            seg3.append(LineString(np.c_[q, np.full(len(q), z)]))
-    noded = unary_union(seg3)
-    geoms = list(noded.geoms) if hasattr(noded, "geoms") else [noded]
-    sv, sz, ss = [], [], []
+        for q, z in ((p - nl * sl * gap_m, levels["high"][i]), (p + nl * sl * gap_m, levels["low"][i])):
+            strings.append(LineString(q).simplify(0.1))
+            pz.append(np.c_[q, np.full(len(q), z)])
+    PZ = np.concatenate(pz)
+    U = shapely.set_precision(unary_union(strings), 0.05)
+    geoms = list(U.geoms) if hasattr(U, "geoms") else [U]
+    sv, ss = [], []
     k = 0
     for g in geoms:
-        c = np.asarray(g.coords)
+        c = np.asarray(g.coords)[:, :2]
         if len(c) < 2:
             continue
-        sv.append(c[:, :2])
-        sz.append(c[:, 2])
+        sv.append(c)
         ss.append(np.c_[np.arange(k, k + len(c) - 1), np.arange(k + 1, k + len(c))])
         k += len(c)
+    SV = np.concatenate(sv)
+    S = np.concatenate(ss)
+    key = np.round(SV * 20).astype(np.int64)
+    _, first, inv = np.unique(key[:, 0] * 10_000_000 + key[:, 1], return_index=True, return_inverse=True)
+    SV = SV[first]
+    S = inv[S]
+    S = S[S[:, 0] != S[:, 1]]
+    S = np.unique(np.sort(S, axis=1), axis=0)
+    segs = shapely.linestrings(np.stack([SV[S[:, 0]], SV[S[:, 1]]], 1))
+    a_, b_ = STRtree(segs).query(segs, predicate="intersects")
+    m = a_ < b_
+    a_, b_ = a_[m], b_[m]
+    share = (S[a_, 0] == S[b_, 0]) | (S[a_, 0] == S[b_, 1]) | (S[a_, 1] == S[b_, 0]) | (S[a_, 1] == S[b_, 1])
+    bad = np.zeros(len(S), bool)
+    bad[a_[~share]] = True
+    bad[b_[~share]] = True
+    ov = shapely.overlaps(segs[a_[share]], segs[b_[share]])
+    bad[a_[share][ov]] = True
+    bad[b_[share][ov]] = True
+    S = S[~bad]
+    # heights of the string vertices: nearest original string point
+    ptree = STRtree(shapely.points(PZ[:, :2]))
+    qi, ti = ptree.query_nearest(shapely.points(SV), return_distance=False)
+    _, firstq = np.unique(qi, return_index=True)          # ties give several matches: keep one
+    SZ = PZ[ti[firstq], 2]
     # terrain points away from the lines
     near = features.rasterize([(LineString(a).buffer(zone_m), 1) for a in lines if len(a) >= 2],
                               out_shape=(H_, W_), transform=transform).astype(bool)
@@ -392,29 +425,49 @@ def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_st
     rr, cc = rr.ravel(), cc.ravel()
     keep = ~near[rr, cc]
     rr, cc = rr[keep], cc[keep]
-    gxy = np.c_[x0 + (cc + 0.5) * res, y1 - (rr + 0.5) * res]
-    bx = np.r_[np.arange(x0, x1, coarse_m), x1]
-    by = np.r_[np.arange(y0, y1, coarse_m), y1]
-    border = np.unique(np.r_[np.c_[bx, np.full_like(bx, y0)], np.c_[bx, np.full_like(bx, y1)],
-                             np.c_[np.full_like(by, x0), by], np.c_[np.full_like(by, x1), by]], axis=0)
-    V = np.concatenate(sv + [gxy, border])
-    Z = np.concatenate(sz + [z0[rr, cc], sample(z0, transform, *border.T)])
-    S = np.concatenate(ss) if ss else np.zeros((0, 2), int)
-    key = np.round(V * 100).astype(np.int64)
-    _, first, inv = np.unique(key[:, 0] * 10_000_000_000 + key[:, 1], return_index=True, return_inverse=True)
-    V, Z = np.round(V[first], 2), Z[first]
-    S = inv[S]
-    S = S[S[:, 0] != S[:, 1]]
-    S = np.unique(np.sort(S, axis=1), axis=0)
-    out = triangle.triangulate({"vertices": V, "segments": S}, "pQ")
+    gxy = np.c_[(cc + 0.5) * res, (H_ - rr - 0.5) * res]
+    gz = z0[rr, cc]
+    # fill the benched zone with floor points: each takes the level of the nearest
+    # string (crest or toe), i.e. the floor on its own side of the nearest wall
+    sf = max(1, int(round(fill_m / res)))
+    fr, fc = np.mgrid[sf // 2:H_:sf, sf // 2:W_:sf]
+    fr, fc = fr.ravel(), fc.ravel()
+    inz = near[fr, fc]
+    fr, fc = fr[inz], fc[inz]
+    fxy = np.c_[(fc + 0.5) * res, (H_ - fr - 0.5) * res]
+    (fi, ft), fd = ptree.query_nearest(shapely.points(fxy), return_distance=True)
+    _, f1 = np.unique(fi, return_index=True)
+    fd, ft = fd[f1], ft[f1]
+    ok = fd > clear_m
+    fxy, fz, fd = fxy[ok], PZ[ft[ok], 2], fd[ok]
+    # toward the edge of the benched zone, hand over smoothly to the measured ground
+    wgt = np.clip((zone_m - fd) / max(zone_m - blend_from_m, 1e-6), 0, 1)
+    fz = wgt * fz + (1 - wgt) * sample(z0, transform, *(fxy + off).T)
+    gxy = np.r_[gxy, fxy]
+    gz = np.r_[gz, fz]
+    bx = np.r_[np.arange(0, x1 - x0, coarse_m), x1 - x0]
+    by = np.r_[np.arange(0, y1 - y0, coarse_m), y1 - y0]
+    border = np.unique(np.r_[np.c_[bx, np.zeros_like(bx)], np.c_[bx, np.full_like(bx, y1 - y0)],
+                             np.c_[np.zeros_like(by), by], np.c_[np.full_like(by, x1 - x0), by]], axis=0)
+    V = np.concatenate([SV, gxy, border])
+    Z = np.concatenate([SZ, gz, sample(z0, transform, *(border + off).T)])
+    # all points unique (strings first, so segment indices stay valid)
+    key = np.round(V * 20).astype(np.int64)
+    _, first = np.unique(key[:, 0] * 10_000_000 + key[:, 1], return_index=True)
+    keep = np.zeros(len(V), bool)
+    keep[first] = True
+    keep[:len(SV)] = True
+    V, Z = V[keep], Z[keep]
+    out = triangle.triangulate({"vertices": V, "segments": S}, "pcQ")
     TV = out["vertices"]
     Zall = np.empty(len(TV))
     Zall[:len(V)] = Z
     if len(TV) > len(V):
-        Zall[len(V):] = sample(z0, transform, *TV[len(V):].T)
+        Zall[len(V):] = sample(z0, transform, *(TV[len(V):] + off).T)
     if log:
-        log.info("Vector terrain (TIN) of the whole site: %d vertices, %d triangles", len(TV), len(out["triangles"]))
-    return {"verts": np.c_[TV, Zall], "tris": out["triangles"].astype(np.int64)}
+        log.info("Vector terrain (TIN) of the whole site: %d vertices, %d triangles (%d breakline segments, "
+                 "%d left out where lines cross)", len(TV), len(out["triangles"]), len(S), int(bad.sum()))
+    return {"verts": np.c_[TV + off, Zall], "tris": out["triangles"].astype(np.int64)}
 
 
 def raster_from_tin(tin, transform, shape, zone, z_outside):
