@@ -191,3 +191,73 @@ def write_quarry_3dm(out_path, z, transform, area, origin, crs, bench_h, user_li
         log.info("Rhino file %s: %d lines, mesh %d faces, Brep %d floors + %d wall faces (hidden layer)",
                  out_path.name, stats.get("lines", 0), stats["mesh_faces"], n_floor, n_wall)
     return stats
+
+
+def write_vector_3dm(out_path, tin, floors, lines, levels, low_on_left, origin, crs, bench_h,
+                     base_margin_m=10.0, gap_m=0.3, log=None):
+    """Rhino file of the vector model built on the user's bench lines.
+      Quarry Benches (your drawing)   the lines as drawn (z = 0)
+      Quarry Benches 3D               crest (top) and toe (bottom) of every line at its level
+      Quarry model (whole site)       TIN mesh of the whole site: flat floors, walls on the lines
+      Quarry Brep solids (hidden)     one closed box-like solid per bench floor: the floor
+                                      outline (sides on your lines) extruded down to a common base
+    tin: dict(verts (N,3) CRS, tris); floors: list of (shapely Polygon in CRS, z)."""
+    import rhino3dm as r
+
+    ox, oy = origin
+    m = r.File3dm()
+    m.Settings.ModelUnitSystem = r.UnitSystem.Meters
+    m.Settings.ModelAbsoluteTolerance = 0.001
+    L_draw = _layer(m, r, "Quarry Benches (your drawing)", (255, 0, 0, 255))
+    L_3d = _layer(m, r, "Quarry Benches 3D", (255, 140, 0, 255))
+    L_mesh = _layer(m, r, "Quarry model (whole site)", (190, 180, 160, 255))
+    L_sol = _layer(m, r, "Quarry Brep solids (simplified)", (120, 160, 200, 255), visible=False)
+    L_info = _layer(m, r, "Info", (30, 90, 200, 255))
+
+    for i, a in enumerate(lines):
+        loc = a - np.array([ox, oy])
+        m.Objects.AddCurve(r.PolylineCurve([r.Point3d(float(x), float(y), 0.0) for x, y in loc]),
+                           _attrs(r, L_draw, f"bench_line_{i}"))
+        t = np.gradient(loc, axis=0)
+        t /= np.hypot(t[:, 0], t[:, 1])[:, None] + 1e-12
+        nl = np.c_[-t[:, 1], t[:, 0]]
+        sl = 1.0 if low_on_left[i] else -1.0
+        for name, q, z in (("crest", loc - nl * sl * gap_m, levels["high"][i]),
+                           ("toe", loc + nl * sl * gap_m, levels["low"][i])):
+            m.Objects.AddCurve(r.PolylineCurve([r.Point3d(float(x), float(y), float(z)) for x, y in q]),
+                               _attrs(r, L_3d, f"bench_line_{i}_{name}_{z:.2f}m"))
+
+    V = tin["verts"] - np.array([ox, oy, 0.0])
+    me = r.Mesh()
+    for x, y, z in V:
+        me.Vertices.Add(float(x), float(y), float(z))
+    for a_, b_, c_ in tin["tris"]:
+        me.Faces.AddFace(int(a_), int(b_), int(c_))
+    me.Normals.ComputeNormals()
+    me.Compact()
+    m.Objects.AddMesh(me, _attrs(r, L_mesh, "quarry_model_whole_site"))
+
+    base = (min(z for _, z in floors) if floors else float(V[:, 2].min())) - base_margin_m
+    n_sol = 0
+    for k, (poly, z) in enumerate(floors):
+        ext = np.asarray(poly.exterior.coords) - np.array([ox, oy])
+        crv = r.PolylineCurve([r.Point3d(float(x), float(y), float(z)) for x, y in ext])
+        e = r.Extrusion.Create(crv, -(z - base), True)
+        if e is None:
+            continue
+        for hole in poly.interiors:
+            hc = np.asarray(hole.coords) - np.array([ox, oy])
+            if len(hc) >= 4:
+                e.AddInnerProfile(r.PolylineCurve([r.Point3d(float(x), float(y), float(z)) for x, y in hc]))
+        m.Objects.AddExtrusion(e, _attrs(r, L_sol, f"bench_floor_{k}_{z:.2f}m"))
+        n_sol += 1
+    m.Objects.AddTextDot(f"Quarry Maker origin\nE {ox:.0f}\nN {oy:.0f}\n{crs}\nbench height {bench_h:g} m\n"
+                         f"solids down to {base:.1f} m", r.Point3d(0, 0, float(V[:, 2].max())), _attrs(r, L_info, "origin"))
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not m.Write(str(out_path), 7):
+        raise RuntimeError(f"could not write {out_path}")
+    if log:
+        log.info("Rhino file %s: %d lines, whole-site mesh %d triangles, %d bench solids (hidden layer)",
+                 out_path.name, len(lines), len(tin["tris"]), n_sol)
+    return {"lines": len(lines), "mesh_triangles": int(len(tin["tris"])), "solids": n_sol, "solid_base_m": base}

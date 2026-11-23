@@ -7,3 +7,4 @@ Pillow>=10.0
 pyyaml>=6.0
 requests>=2.28
 rhino3dm>=8.0
+triangle>=20230923

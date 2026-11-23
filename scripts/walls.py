@@ -306,12 +306,15 @@ def line_low_sides(lines, transform, shape, band, z_smooth, res, side_m=6.0, log
     """For each polyline, which side is lower, decided for the whole line:
     the dark wall band (shade + shadow) lies on the lower side when present,
     otherwise the smoothed DEM decides. Returns a per-cell (low_c, low_r) unit
-    vector field on line cells (column = east, row = south) and stats."""
+    vector field on line cells (column = east, row = south) and stats, incl.
+    low_on_left: per line, True when the lower floor is on the left of the
+    drawing direction as seen on the map (x east, y north)."""
     Hh, Ww = shape
     lowc = np.zeros(shape)
     lowr = np.zeros(shape)
     inv = ~transform
     n_band = n_dem = 0
+    lefts = []
     for a in lines:
         cc, rr = inv * (a[:, 0], a[:, 1])
         cc, rr = np.asarray(cc), np.asarray(rr)
@@ -319,6 +322,7 @@ def line_low_sides(lines, transform, shape, band, z_smooth, res, side_m=6.0, log
         seg = np.hypot(np.diff(cc), np.diff(rr))
         s = np.r_[0, np.cumsum(seg)]
         if s[-1] < 1:
+            lefts.append(False)
             continue
         t = np.arange(0, s[-1], 0.5)
         c = np.interp(t, s, cc)
@@ -349,6 +353,7 @@ def line_low_sides(lines, transform, shape, band, z_smooth, res, side_m=6.0, log
             rr_ = np.clip(np.round(r - nr * j).astype(int), 0, Hh - 1)
             left_low = float((z_smooth[rl, cl] - z_smooth[rr_, cr_]).sum()) < 0
             n_dem += 1
+        lefts.append(not bool(left_low))       # grid rows run south: grid-left = map-right
         sg = 1.0 if left_low else -1.0
         ci = np.clip(np.round(c).astype(int), 0, Ww - 1)
         ri = np.clip(np.round(r).astype(int), 0, Hh - 1)
@@ -357,4 +362,4 @@ def line_low_sides(lines, transform, shape, band, z_smooth, res, side_m=6.0, log
     if log:
         log.info("Step direction of your lines: %d from wall shadows in the photo, %d from the terrain",
                  n_band, n_dem)
-    return lowc, lowr, {"from_shadow_bands": n_band, "from_terrain": n_dem}
+    return lowc, lowr, {"from_shadow_bands": n_band, "from_terrain": n_dem, "low_on_left": lefts}
