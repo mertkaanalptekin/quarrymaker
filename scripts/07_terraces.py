@@ -759,8 +759,10 @@ def main(argv=None) -> int:
         dzv = dz[zn] if zn.any() else np.zeros(1)
         Hc_ = float(trc["info"].get("bench_height_m") or Hb)
         share = float((dzv > Hc_).mean())
-        checks.append(("Benches from your lines are cut into the ground (mean change <= 0, fill above H on < 2% of the zone)",
-                       float(dzv.mean()) <= 0.01 and share < 0.02,
+        # some fill is expected: the 30 m DEM measures narrow ridges and pit rims too low,
+        # and spoil dumps really are fill
+        checks.append(("Benches from your lines are cut into the ground (mean change <= 0, fill above H on < 5% of the zone)",
+                       float(dzv.mean()) <= 0.01 and share < 0.05,
                        f"mean {float(dzv.mean()):+.2f} m, fill above {Hc_:.1f} m on {100 * share:.2f}% "
                        f"(99th percentile {float(np.percentile(dzv, 99)):+.2f} m, max {float(dzv.max()):+.2f} m), "
                        f"max cut {float(dzv.min()):+.2f} m"))

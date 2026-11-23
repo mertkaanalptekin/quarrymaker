@@ -232,7 +232,7 @@ def _arclen(p):
 
 
 def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.0, carve=0.5,
-                anchor_w=0.05, wall_w=4.0, min_rays=3, side_m=8.0, fill_tol=1.0, fill_w=40.0,
+                anchor_w=0.05, wall_w=4.0, min_rays=3, side_m=(8.0, 18.0), fill_tol=1.0, fill_w=40.0,
                 piece_m=80.0, cont_w=1.0, tv_eps=0.5, iters=8, pairs=None, log=None):
     """Heights of the floors on both sides of every bench line.
 
@@ -249,6 +249,7 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
       * a pull of each side toward the measured terrain side_m out on that side,
         lowered by carve * bench_h / 2, reweighted (x fill_w) where a side would
         sit more than fill_tol above the ground: benches are cut into the ground.
+        side_m may list several distances (the floor reaches ~18 m flat).
     Facing sides linked by at least `min_rays` rays, and consecutive pieces that
     differ by less than tv_eps, are then merged into exact common levels.
     low_left[i]: True when the lower floor is on the left of line i (drawing direction).
@@ -291,10 +292,12 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
             Lk = max(step_m * m.sum(), 1.0)
             rows.append({2 * k: 1.0, 2 * k + 1: -1.0}); rhs.append(H); wts.append(wall_w * Lk)
             for left in (True, False):
-                q = p[m] + nl[m] * (side_m if left else -side_m)
-                zs = float(np.mean(sample(z0, transform, *q.T)))
-                anc.append((len(rows), node(i, k, left), zs))
-                rows.append({node(i, k, left): 1.0}); rhs.append(zs - 0.5 * carve * H); wts.append(anchor_w * Lk)
+                for dm in np.atleast_1d(side_m):
+                    q = p[m] + nl[m] * (dm if left else -dm)
+                    zs = float(np.mean(sample(z0, transform, *q.T)))
+                    anc.append((len(rows), node(i, k, left), zs))
+                    rows.append({node(i, k, left): 1.0}); rhs.append(zs - 0.5 * carve * H)
+                    wts.append(anchor_w * Lk / len(np.atleast_1d(side_m)))
             if k > first[i]:
                 for side in (0, 1):
                     cont.append((len(rows), 2 * (k - 1) + side, 2 * k + side))
@@ -413,8 +416,8 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
                  "%d level steps along lines; wall heights median %.1f m (10-90%%: %.1f-%.1f m)",
                  n_pc, piece_m, len(pairs), len(np.unique(roots)), steps, float(np.median(walls)),
                  float(np.percentile(walls, 10)), float(np.percentile(walls, 90)))
-        log.info("Bench floors against the measured ground %.0f m out: median %+.1f m, 95%% below %+.1f m, "
-                 "max %+.1f m", side_m, float(np.median(f)), float(np.percentile(f, 95)), float(f.max()))
+        log.info("Bench floors against the measured ground %s m out: median %+.1f m, 95%% below %+.1f m, "
+                 "max %+.1f m", "/".join(f"{v:.0f}" for v in np.atleast_1d(side_m)), float(np.median(f)), float(np.percentile(f, 95)), float(f.max()))
     return {"pieces": pcs, "high": hi_m, "low": lo_m, "walls": walls, "groups": roots,
             "n_links": len(pairs), "n_steps": steps, "pairs": pairs}
 
