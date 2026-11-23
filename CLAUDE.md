@@ -251,16 +251,18 @@ Calculates the quarry's benches from the satellite image with the help of the DE
   - **Height from band width (not used):** shadow plus visible face width ∝ height, but the unknown view angle and the 0.5 m pixel make it too noisy (median band 1.5–2.5 m wide).
   - **User-drawn bench lines (`terraces.user_lines`):** the user traced the bench edges in Rhino on top of the Quarry Maker model (top view, projected to CPlane) and chose the file in the app.
     - Input: `.3dm` via rhino3dm (unit system converted; layers whose name contains "bench", else all curves), `.dxf`, or GeoJSON. Coordinates are local model coordinates (real = local + origin).
-    - Those lines are the **only** walls; no photo tracing is added.
-    - The quarry area is extended 30 m around them.
+    - Those lines are the **only** walls; no photo tracing is added. DXF units come from `$INSUNITS`.
     - Lower side **per whole line** (`walls.line_low_sides`): the side with the dark wall band (shade plus shadow) within 6 m, when clear; else the DEM smoothed at 30 m, 15 m out.
-    - Floors are **exactly flat**: one height per connected floor piece (`flat_exact`).
-    - Area B: 80% of line length on a wall, F1 0.27, against 74% and 0.23 with 80 m local flattening.
-    - Real site: 360 curves, 97 km.
+    - **Vector model (`vectormesh.py`, the user asked for no rasterizing):**
+      - every line is level: one height on its high side, one on its low side;
+      - `line_levels`: least squares with wall = H, shared floors found by casting rays from each line side to the next line (1 m label raster, ≥ 3 rays), a weak DEM anchor, at most 0.5 H carve; union-find then merges facing sides into exact common levels (real site: 1,074 links, 277 shared floors, median wall 6.5 m);
+      - `tin_from_levels`: constrained Delaunay (Shewchuk Triangle, `pcQ`) with crest and toe strings 0.3 m either side of each line (noded at 5 cm; crossing pieces left out), 4 m fill points taking the nearest string's level, blended to the DEM between 18 and 40 m from the lines, 10 m DEM points over the rest of the **whole site**;
+      - rasters (`terraces_dem.tif`, `dz.tif`) are sampled from the TIN; the Blender mesh `TERRAIN_terraced` is the TIN itself (`terrain_tin.npz`), with no context mesh;
+      - real site: 697k vertices, 1.39 M triangles, built in a few seconds.
   - **Rhino output (`rhino_export.py`, `exchange/rhino/vNNN/terraced/quarry_terraced.3dm`, metres, local coords):**
-    - layers: your lines (2D); lines lifted to their wall tops (3D); the block mesh of the excavated area only;
-    - a **hidden** "Quarry Brep (simplified)" layer: each flat floor piece as a planar trimmed face (outline simplified 1.5 m) plus vertical planar wall faces where the ground outside drops > `mesh_wall_m`;
-    - the Breps are not joined (rhino3dm cannot join); Rhino's Join / MergeAllCoplanarFaces can do it.
+    - vector mode (`write_vector_3dm`): your lines (2D); crest and toe curves at their levels (3D); the whole-site TIN mesh; a **hidden** "Quarry Brep solids (simplified)" layer: each flat floor polygon (groups of flat TIN triangles, `floor_polygons`) inside the excavated zone as a closed extrusion with holes, from its floor height down to 10 m below the lowest floor, so the solids are box-like and their sides run along the lines; an info dot;
+    - raster mode (`write_quarry_3dm`): lines, block mesh of the excavated area, hidden planar floors and vertical wall faces;
+    - rhino3dm cannot join or Boolean; Rhino's BooleanUnion can.
   - **Labelling:** `bench_method` = 2 marks these cells, and they are drawn in `07_bench_lines.png`.
   - **Known limits:**
     - the overall depth follows the old DEM; parts dug deeper since are too shallow;

@@ -3,6 +3,7 @@ polygons, written as DXF (R12, readable by Rhino, AutoCAD, QGIS) and GeoJSON.
 numpy + shapely + rasterio only."""
 from __future__ import annotations
 
+from pathlib import Path
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -238,3 +239,50 @@ def yard_mask(lum, within, slope, res):
     dens = gauss(blobs.astype(float), 10 / res)
     yard = within & (dens > 0.30) & (slope < 15)
     return gauss(yard.astype(float), 3) > 0.5
+
+
+def read_dxf_polylines(path, layer_word="bench"):
+    """2D polylines from a DXF (LWPOLYLINE, POLYLINE/VERTEX, LINE). Layers whose
+    name contains `layer_word` are used when any exist, else all. Converted to
+    metres from the header's $INSUNITS (mm, cm, m, in, ft); unitless = metres."""
+    lines = Path(path).read_text(errors="replace").splitlines()
+    pairs = [(lines[i].strip(), lines[i + 1].strip()) for i in range(0, len(lines) - 1, 2)]
+    scale = 1.0
+    for i, (code, val) in enumerate(pairs[:-1]):
+        if code == "9" and val == "$INSUNITS":
+            scale = {1: 0.0254, 2: 0.3048, 4: 0.001, 5: 0.01, 6: 1.0}.get(int(pairs[i + 1][1]), 1.0)
+            break
+    ents, cur, in_ent = [], None, False
+    for code, val in pairs:
+        if code == "2" and val == "ENTITIES":
+            in_ent = True
+        if not in_ent:
+            continue
+        if code == "0":
+            if cur is not None:
+                ents.append(cur)
+            cur = {"type": val, "layer": "", "pts": [], "x": None}
+            if val == "ENDSEC":
+                break
+        elif cur is not None:
+            if code == "8":
+                cur["layer"] = val
+            elif code in ("10", "11"):
+                cur["x"] = float(val)
+            elif code in ("20", "21") and cur["x"] is not None:
+                cur["pts"].append((cur["x"], float(val)))
+                cur["x"] = None
+    out, poly = [], None
+    for e in ents:
+        t = e["type"]
+        if t == "POLYLINE":
+            poly = {"layer": e["layer"], "pts": []}
+        elif t == "VERTEX" and poly is not None:
+            poly["pts"] += e["pts"][:1]
+        elif t == "SEQEND" and poly is not None:
+            out.append(poly)
+            poly = None
+        elif t in ("LWPOLYLINE", "LINE"):
+            out.append({"layer": e["layer"], "pts": e["pts"]})
+    use = [o for o in out if layer_word in o["layer"].lower()] or out
+    return [np.array(o["pts"], float) * scale for o in use if len(o["pts"]) >= 2]

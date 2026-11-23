@@ -198,18 +198,26 @@ If you know the quarry better than the automatic tracing, draw the bench edges y
 3. **Choose the file.** In the app, step 2, choose it under **Your bench lines** and press
    **Save settings**. Then run step 7 again; the results go into a new version folder.
 
-Step 7 then builds a wall exactly on every line you drew. The ground between the lines becomes
-exactly flat bench floors, one bench height apart. Which side of a line is lower is decided for the
-whole line: from the wall's shadow in the photo where it is visible, otherwise from the terrain.
+Step 7 then builds the terrain directly from your lines, without turning them into pixels first:
+- **Every line is a wall.** Each line gets one height on its top side and one on its bottom side, a
+  bench height apart, so the edges are perfectly level and sharp.
+- **Bench floors are exactly flat.** Where the floor in front of one wall meets the foot of another
+  wall, both share the same height.
+- **Which side is lower** is decided for the whole line: from the wall's shadow in the photo where
+  it is visible, otherwise from the terrain.
+- **The whole site is kept.** Around the drawn area (40 m), the benches blend into the measured
+  terrain; everything farther away is the measured terrain itself.
+The result is a triangle mesh (not a grid), so walls follow your lines exactly.
 
-You also get `quarry_terraced.3dm` in the Rhino folder (`exchange/rhino/vNNN/terraced/`), with these
-layers:
-- **your lines;**
-- **the same lines at the top of their walls (3D);**
-- **the quarry model:** a mesh of the excavated area;
-- **a hidden layer "Quarry Brep (simplified)":** each bench floor as a flat surface and the walls
-  as vertical surfaces. Use Join in Rhino if you want them as one polysurface.
-
+You also get `quarry_terraced.3dm` in the Rhino folder (`exchange/rhino/vNNN/terraced/`), in metres,
+with these layers:
+- **your lines** (as drawn);
+- **the bench edges in 3D:** the top and the foot of every wall at their heights;
+- **the quarry model (whole site):** the triangle mesh;
+- **a hidden layer "Quarry Brep solids (simplified)":** every flat bench floor in the excavated area
+  as a closed, box-like solid: its outline follows your lines, its top is the floor height, and it
+  reaches down to a common base 10 m below the lowest floor. Turn the layer on to use them; use
+  *BooleanUnion* in Rhino if you want one solid.
 ## Plan linework (step 8)
 
 Step 8 writes `quarry_plan.dxf` (open it in Rhino with units set to Meters) with these layers:
