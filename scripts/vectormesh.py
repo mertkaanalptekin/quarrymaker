@@ -352,7 +352,7 @@ def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_st
     more than zone_m away from any line, and the site border."""
     import triangle
     from rasterio import features
-    from shapely.geometry import LineString, MultiLineString
+    from shapely.geometry import LineString
     from shapely.ops import unary_union
 
     H_, W_ = z0.shape
@@ -371,9 +371,8 @@ def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_st
         hi = p - nl * sl * gap_m
         lo = p + nl * sl * gap_m
         for q, z in ((hi, levels["high"][i]), (lo, levels["low"][i])):
-            c = np.c_[q, np.full(len(q), z)]
-            seg3 += [tuple(map(tuple, c[k:k + 2])) for k in range(len(c) - 1)]
-    noded = unary_union(MultiLineString(seg3))
+            seg3.append(LineString(np.c_[q, np.full(len(q), z)]))
+    noded = unary_union(seg3)
     geoms = list(noded.geoms) if hasattr(noded, "geoms") else [noded]
     sv, sz, ss = [], [], []
     k = 0
@@ -416,3 +415,28 @@ def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_st
     if log:
         log.info("Vector terrain (TIN) of the whole site: %d vertices, %d triangles", len(TV), len(out["triangles"]))
     return {"verts": np.c_[TV, Zall], "tris": out["triangles"].astype(np.int64)}
+
+
+def raster_from_tin(tin, transform, shape, zone, z_outside):
+    """Interpreted raster from the vector model (for the .tif outputs and checks):
+    inside `zone` every cell takes the height of the TIN triangle it falls in
+    (exact on flat floors); elsewhere z_outside."""
+    from rasterio import features
+    from shapely.geometry import Polygon
+
+    V, T = tin["verts"], tin["tris"]
+    cen = V[T, :2].mean(1)
+    inv = ~transform
+    c, r = inv * (cen[:, 0], cen[:, 1])
+    c = np.clip(np.asarray(c).astype(int), 0, shape[1] - 1)
+    r = np.clip(np.asarray(r).astype(int), 0, shape[0] - 1)
+    sel = zone[r, c]
+    zmean = V[T[sel], 2].mean(1)
+    # rasterize triangle ids (+1), then look up heights (exact on flat floors)
+    ids = np.nonzero(sel)[0]
+    lab = features.rasterize(((Polygon(V[T[k], :2]), i + 1) for i, k in enumerate(ids)), out_shape=shape,
+                             transform=transform, dtype="int32")
+    out = np.asarray(z_outside, dtype="float64").copy()
+    m = (lab > 0) & zone
+    out[m] = zmean[lab[m] - 1]
+    return out
