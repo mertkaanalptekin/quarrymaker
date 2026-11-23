@@ -227,47 +227,54 @@ def floor_polygons(verts, tris, inside_fn=None, flat_tol=0.05, min_area_m2=50.0,
     return out
 
 
+def _arclen(p):
+    return np.r_[0.0, np.cumsum(np.hypot(*np.diff(p, axis=0).T))]
+
+
 def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.0, carve=0.5,
-                anchor_w=0.02, wall_w=4.0, min_rays=3, log=None):
-    """Heights of the floors on both sides of every bench line, constant along
-    each line (bench edges are level).
+                anchor_w=0.05, wall_w=4.0, min_rays=3, side_m=8.0, fill_tol=1.0, fill_w=40.0,
+                piece_m=80.0, cont_w=1.0, tv_eps=0.5, iters=8, pairs=None, log=None):
+    """Heights of the floors on both sides of every bench line.
 
-    Unknowns: level of the high side and of the low side of every line.
-    Constraints (least squares):
+    Every line is cut into pieces of about piece_m; each piece has one level on
+    its high side and one on its low side, so bench edges are level piece by
+    piece. Unknowns are solved by weighted least squares:
       * high - low = bench_h                       (one bench per wall)
-      * rays cast from each line to both sides meet the next line: the floor
-        between them is shared, so the two facing sides have the same level
-      * a weak pull of the line's mid-height toward the measured terrain along
-        the line, lowered by carve * bench_h (benches are cut into the ground)
-    Facing sides linked by at least `min_rays` rays are then merged into one
-    exact level, so each floor between two lines is perfectly flat.
+      * consecutive pieces of a line keep the same levels, with a total-variation
+        (reweighted L1) penalty: levels stay exactly equal over long runs and
+        change in a few clean steps where the ground demands it (benches step
+        down along a face);
+      * rays cast from each piece to both sides meet the next line: the floor
+        between them is shared, so the two facing sides have the same level;
+      * a pull of each side toward the measured terrain side_m out on that side,
+        lowered by carve * bench_h / 2, reweighted (x fill_w) where a side would
+        sit more than fill_tol above the ground: benches are cut into the ground.
+    Facing sides linked by at least `min_rays` rays, and consecutive pieces that
+    differ by less than tv_eps, are then merged into exact common levels.
     low_left[i]: True when the lower floor is on the left of line i (drawing direction).
-    Returns dict(high, low, groups, n_links)."""
+    Returns dict(pieces=[(edges, high, low)] per line, high, low (length means per
+    line), groups, n_links, pairs); use level_at() for heights along a line."""
     from shapely.geometry import LineString
-
-    n = len(lines)
-    H = float(bench_h)
-    rows, rhs, wts = [], [], []
-    pair = {}
-
-    def node(i, left):
-        # 2*i = high side, 2*i+1 = low side
-        return 2 * i + (1 if (left == bool(low_left[i])) else 0)
-
-    # which line does a ray meet first? marched over a 1 m map of line ids (topology only;
-    # the geometry stays vector)
     from rasterio import features
     from rasterio.transform import from_origin
-    allp = np.concatenate(lines)
-    gx0, gy0 = allp.min(0) - reach_m - 2
-    gx1, gy1 = allp.max(0) + reach_m + 2
-    gres = 1.0
-    gW, gH = int(np.ceil((gx1 - gx0) / gres)), int(np.ceil((gy1 - gy0) / gres))
-    gtf = from_origin(gx0, gy1, gres, gres)
-    lab = features.rasterize([(LineString(a), i + 1) for i, a in enumerate(lines) if len(a) >= 2],
-                             out_shape=(gH, gW), transform=gtf, all_touched=True, dtype="int32")
-    dens = [_densify(a, 1.0) for a in lines]
-    O, D, I, S = [], [], [], []
+
+    H = float(bench_h)
+    nl_ = len(lines)
+    lens = [float(_arclen(a)[-1]) for a in lines]
+    npc = [max(1, int(round(L / piece_m))) for L in lens]
+    first = np.r_[0, np.cumsum(npc)].astype(int)            # first piece index of each line
+    edges = [np.linspace(0.0, lens[i], npc[i] + 1) for i in range(nl_)]
+    n_pc = int(first[-1])
+
+    def piece(i, s_):
+        return int(first[i] + np.clip(np.searchsorted(edges[i], s_, side="right") - 1, 0, npc[i] - 1))
+
+    def node(i, k, left):
+        # 2*k = high side, 2*k+1 = low side of global piece k (on line i)
+        return 2 * k + (1 if (left == bool(low_left[i])) else 0)
+
+    rows, rhs, wts, anc, cont = [], [], [], [], []
+    O, D, I, K, S = [], [], [], [], []
     for i, a in enumerate(lines):
         p = _densify(a, step_m)
         if len(p) < 2:
@@ -275,74 +282,160 @@ def line_levels(lines, low_left, z0, transform, bench_h, reach_m=60.0, step_m=4.
         t = np.gradient(p, axis=0)
         t /= np.hypot(t[:, 0], t[:, 1])[:, None] + 1e-12
         nl = np.c_[-t[:, 1], t[:, 0]]
-        zl = float(np.mean(sample(z0, transform, *p.T)))
-        L = float(np.hypot(*np.diff(a, axis=0).T).sum())
-        rows.append({2 * i: 1.0, 2 * i + 1: -1.0}); rhs.append(H); wts.append(wall_w * L)
-        rows.append({2 * i: 0.5, 2 * i + 1: 0.5}); rhs.append(zl - carve * H); wts.append(anchor_w * L)
+        sp = _arclen(p)
+        kp = np.array([piece(i, v) for v in sp])
+        for k in range(first[i], first[i + 1]):
+            m = kp == k
+            if not m.any():
+                m = np.zeros(len(p), bool); m[np.argmin(np.abs(sp - edges[i][k - first[i]:k - first[i] + 2].mean()))] = True
+            Lk = max(step_m * m.sum(), 1.0)
+            rows.append({2 * k: 1.0, 2 * k + 1: -1.0}); rhs.append(H); wts.append(wall_w * Lk)
+            for left in (True, False):
+                q = p[m] + nl[m] * (side_m if left else -side_m)
+                zs = float(np.mean(sample(z0, transform, *q.T)))
+                anc.append((len(rows), node(i, k, left), zs))
+                rows.append({node(i, k, left): 1.0}); rhs.append(zs - 0.5 * carve * H); wts.append(anchor_w * Lk)
+            if k > first[i]:
+                for side in (0, 1):
+                    cont.append((len(rows), 2 * (k - 1) + side, 2 * k + side))
+                    rows.append({2 * (k - 1) + side: 1.0, 2 * k + side: -1.0}); rhs.append(0.0)
+                    wts.append(cont_w * piece_m)
         for side in (1.0, -1.0):
-            O.append(p); D.append(nl * side); I.append(np.full(len(p), i)); S.append(np.full(len(p), side))
-    O, D, I, S = np.concatenate(O), np.concatenate(D), np.concatenate(I), np.concatenate(S)
-    hit = np.zeros(len(O), "int64")
-    hitd = np.zeros(len(O))
-    alive = np.ones(len(O), bool)
-    for k in np.arange(1.5, reach_m, 0.5):
-        q = O + D * k
-        c = ((q[:, 0] - gx0) / gres).astype(int)
-        r = ((gy1 - q[:, 1]) / gres).astype(int)
-        ok = alive & (c >= 0) & (c < gW) & (r >= 0) & (r < gH)
-        v = np.zeros(len(O), "int64")
-        v[ok] = lab[r[ok], c[ok]]
-        new = ok & (v > 0) & (v - 1 != I)
-        hit[new] = v[new] - 1
-        hitd[new] = k
-        alive &= ~new
-    sel = np.nonzero(hitd > 0)[0]
-    for idx in sel:
-        i, j = int(I[idx]), int(hit[idx])
-        o = O[idx]
-        q = O[idx] + D[idx] * hitd[idx]
-        bj = dens[j]
-        kk = int(np.argmin(np.hypot(*(bj - q).T)))
-        tj = bj[min(kk + 1, len(bj) - 1)] - bj[max(kk - 1, 0)]
-        nj = np.array([-tj[1], tj[0]])
-        from_left = float(np.dot(o - bj[kk], nj)) > 0
-        a_ = node(i, S[idx] > 0)
-        b_ = node(j, from_left)
-        key = (min(a_, b_), max(a_, b_))
-        pair[key] = pair.get(key, 0) + 1
-    for (a_, b_), c in pair.items():
+            O.append(p); D.append(nl * side); I.append(np.full(len(p), i)); K.append(kp); S.append(np.full(len(p), side))
+
+    if pairs is None:
+        # which line does a ray meet first? marched over a 1 m map of line ids
+        # (topology only; the geometry stays vector)
+        allp = np.concatenate(lines)
+        gx0, gy0 = allp.min(0) - reach_m - 2
+        gx1, gy1 = allp.max(0) + reach_m + 2
+        gres = 1.0
+        gW, gH = int(np.ceil((gx1 - gx0) / gres)), int(np.ceil((gy1 - gy0) / gres))
+        gtf = from_origin(gx0, gy1, gres, gres)
+        lab = features.rasterize([(LineString(a), i + 1) for i, a in enumerate(lines) if len(a) >= 2],
+                                 out_shape=(gH, gW), transform=gtf, all_touched=True, dtype="int32")
+        dens = [_densify(a, 1.0) for a in lines]
+        dens_s = [_arclen(d) for d in dens]
+        O, D, I, K, S = (np.concatenate(v) for v in (O, D, I, K, S))
+        hit = np.zeros(len(O), "int64")
+        hitd = np.zeros(len(O))
+        alive = np.ones(len(O), bool)
+        for k in np.arange(1.5, reach_m, 0.5):
+            q = O + D * k
+            c = ((q[:, 0] - gx0) / gres).astype(int)
+            r = ((gy1 - q[:, 1]) / gres).astype(int)
+            ok = alive & (c >= 0) & (c < gW) & (r >= 0) & (r < gH)
+            v = np.zeros(len(O), "int64")
+            v[ok] = lab[r[ok], c[ok]]
+            new = ok & (v > 0) & (v - 1 != I)
+            hit[new] = v[new] - 1
+            hitd[new] = k
+            alive &= ~new
+        pairs = {}
+        for idx in np.nonzero(hitd > 0)[0]:
+            i, j = int(I[idx]), int(hit[idx])
+            o = O[idx]
+            q = O[idx] + D[idx] * hitd[idx]
+            bj = dens[j]
+            kk = int(np.argmin(np.hypot(*(bj - q).T)))
+            tj = bj[min(kk + 1, len(bj) - 1)] - bj[max(kk - 1, 0)]
+            nj = np.array([-tj[1], tj[0]])
+            from_left = float(np.dot(o - bj[kk], nj)) > 0
+            a_ = node(i, int(K[idx]), S[idx] > 0)
+            b_ = node(j, piece(j, dens_s[j][kk]), from_left)
+            key = (min(a_, b_), max(a_, b_))
+            pairs[key] = pairs.get(key, 0) + 1
+    for (a_, b_), c in pairs.items():
         rows.append({a_: 1.0, b_: -1.0}); rhs.append(0.0); wts.append(float(c) * step_m)
-    # weighted least squares (dense: 2 unknowns per line)
-    A = np.zeros((len(rows), 2 * n))
-    for r, d in enumerate(rows):
+
+    # dense normal equations: 2 unknowns per piece (a few thousand at most)
+    A = np.zeros((len(rows), 2 * n_pc))
+    for r_, d in enumerate(rows):
         for k_, v in d.items():
-            A[r, k_] = v
-    w = np.sqrt(np.asarray(wts))
-    sol, *_ = np.linalg.lstsq(A * w[:, None], np.asarray(rhs) * w, rcond=None)
-    # merge sides that face each other into exact common levels
-    parent = np.arange(2 * n)
+            A[r_, k_] = v
+    wts = np.asarray(wts, float)
+    rhs = np.asarray(rhs, float)
+    ar = np.array([r for r, _, _ in anc]); an = np.array([k for _, k, _ in anc]); az = np.array([z for _, _, z in anc])
+    cr = np.array([r for r, _, _ in cont], int); ca = np.array([x for _, x, _ in cont], int)
+    cb = np.array([x for _, _, x in cont], int)
+    base_a, base_c = wts[ar].copy(), wts[cr].copy() if len(cr) else np.zeros(0)
+    sol = np.zeros(2 * n_pc)
+    for it in range(iters):
+        N = (A * wts[:, None]).T @ A
+        N[np.diag_indices_from(N)] += 1e-9 * (np.trace(N) / len(N))
+        sol = np.linalg.solve(N, (A * wts[:, None]).T @ rhs)
+        wts[ar] = np.where(sol[an] - az > fill_tol, base_a * fill_w, base_a)
+        if len(cr):
+            wts[cr] = base_c * np.minimum(1.0, tv_eps / (np.abs(sol[ca] - sol[cb]) + 1e-6))
+    # merge into exact common levels: facing sides, and consecutive pieces that agree.
+    # Closest pairs first; a merge that would put the crest and the toe of the same
+    # piece on one level (a wall of zero height) is refused.
+    parent = np.arange(2 * n_pc)
+    members = {k: {k // 2: 1 << (k % 2)} for k in range(2 * n_pc)}
 
     def find(a):
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
         return a
-    for (a_, b_), c in pair.items():
-        if c >= min_rays and abs(sol[a_] - sol[b_]) < 0.5 * H:
-            ra, rb = find(a_), find(b_)
-            if ra != rb:
-                parent[ra] = rb
-    roots = np.array([find(k) for k in range(2 * n)])
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        ma, mb = members[ra], members[rb]
+        if len(ma) > len(mb):
+            ra, rb, ma, mb = rb, ra, mb, ma
+        if any((mb.get(k, 0) | v) == 3 for k, v in ma.items()):
+            return
+        for k, v in ma.items():
+            mb[k] = mb.get(k, 0) | v
+        del members[ra]
+        parent[ra] = rb
+    cand = [(abs(sol[a_] - sol[b_]), int(a_), int(b_)) for (a_, b_), c in pairs.items()
+            if c >= min_rays and abs(sol[a_] - sol[b_]) < 0.5 * H]
+    cand += [(abs(sol[a_] - sol[b_]), int(a_), int(b_)) for a_, b_ in zip(ca, cb) if abs(sol[a_] - sol[b_]) < tv_eps]
+    for _, a_, b_ in sorted(cand):
+        union(a_, b_)
+    roots = np.array([find(k) for k in range(2 * n_pc)])
     lev = sol.copy()
     for g in np.unique(roots):
         m = roots == g
         lev[m] = sol[m].mean()
+    pcs = [(edges[i], lev[2 * first[i]:2 * first[i + 1]:2], lev[2 * first[i] + 1:2 * first[i + 1]:2]) for i in range(nl_)]
+    hi_m = np.array([np.average(h, weights=np.diff(e)) if e[-1] > 0 else h[0] for e, h, _ in pcs])
+    lo_m = np.array([np.average(lo, weights=np.diff(e)) if e[-1] > 0 else lo[0] for e, _, lo in pcs])
+    walls = lev[0::2] - lev[1::2]
+    steps = int(sum(1 for a_, b_ in zip(ca, cb) if a_ % 2 == 0 and abs(lev[a_] - lev[b_]) > 0.05))
     if log:
-        resid = np.array([lev[2 * i] - lev[2 * i + 1] for i in range(n)])
-        log.info("Bench levels from your lines: %d floor links, %d shared floors; wall heights median %.1f m "
-                 "(10-90%%: %.1f-%.1f m)", len(pair), len(np.unique(roots)), float(np.median(resid)),
-                 float(np.percentile(resid, 10)), float(np.percentile(resid, 90)))
-    return {"high": lev[0::2], "low": lev[1::2], "groups": roots, "n_links": len(pair)}
+        f = lev[an] - az
+        log.info("Bench levels from your lines: %d pieces of ~%.0f m, %d floor links, %d shared floors, "
+                 "%d level steps along lines; wall heights median %.1f m (10-90%%: %.1f-%.1f m)",
+                 n_pc, piece_m, len(pairs), len(np.unique(roots)), steps, float(np.median(walls)),
+                 float(np.percentile(walls, 10)), float(np.percentile(walls, 90)))
+        log.info("Bench floors against the measured ground %.0f m out: median %+.1f m, 95%% below %+.1f m, "
+                 "max %+.1f m", side_m, float(np.median(f)), float(np.percentile(f, 95)), float(f.max()))
+    return {"pieces": pcs, "high": hi_m, "low": lo_m, "walls": walls, "groups": roots,
+            "n_links": len(pairs), "n_steps": steps, "pairs": pairs}
+
+
+def level_at(levels, i, pts, which, ramp_m=1.0):
+    """Level of side `which` ('high' or 'low') of line i at points `pts` that
+    follow the line in order (e.g. a densified or offset copy of it). Changes
+    between pieces are short steps of ramp_m."""
+    e, hi, lo = levels["pieces"][i]
+    v = hi if which == "high" else lo
+    if len(v) == 1:
+        return np.full(len(pts), float(v[0]))
+    s_ = _arclen(np.asarray(pts, float))
+    s_ = s_ * (e[-1] / s_[-1]) if s_[-1] > 0 else s_
+    xs, ys = [0.0], [float(v[0])]
+    for k in range(1, len(v)):
+        b = e[k]
+        xs += [b - ramp_m / 2, b + ramp_m / 2]
+        ys += [float(v[k - 1]), float(v[k])]
+    xs.append(float(e[-1]) + 1.0); ys.append(float(v[-1]))
+    return np.interp(s_, xs, ys)
 
 
 def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_step_m=1.0, zone_m=40.0,
@@ -377,9 +470,9 @@ def tin_from_levels(lines, low_left, levels, z0, transform, gap_m=0.3, string_st
         t /= np.hypot(t[:, 0], t[:, 1])[:, None] + 1e-12
         nl = np.c_[-t[:, 1], t[:, 0]]
         sl = 1.0 if low_left[i] else -1.0                 # direction of the low side
-        for q, z in ((p - nl * sl * gap_m, levels["high"][i]), (p + nl * sl * gap_m, levels["low"][i])):
+        for q, which in ((p - nl * sl * gap_m, "high"), (p + nl * sl * gap_m, "low")):
             strings.append(LineString(q).simplify(0.1))
-            pz.append(np.c_[q, np.full(len(q), z)])
+            pz.append(np.c_[q, level_at(levels, i, q, which)])
     PZ = np.concatenate(pz)
     U = shapely.set_precision(unary_union(strings), 0.05)
     geoms = list(U.geoms) if hasattr(U, "geoms") else [U]

@@ -199,8 +199,9 @@ If you know the quarry better than the automatic tracing, draw the bench edges y
    **Save settings**. Then run step 7 again; the results go into a new version folder.
 
 Step 7 then builds the terrain directly from your lines, without turning them into pixels first:
-- **Every line is a wall.** Each line gets one height on its top side and one on its bottom side, a
-  bench height apart, so the edges are perfectly level and sharp.
+- **Every line is a wall.** Along each stretch of a line (about 80 m), the top and the foot of the
+  wall are perfectly level, a bench height apart. Where the ground falls along a long line, the
+  bench steps down to the next level in a sharp step, as real benches do.
 - **Bench floors are exactly flat.** Where the floor in front of one wall meets the foot of another
   wall, both share the same height.
 - **Which side is lower** is decided for the whole line: from the wall's shadow in the photo where

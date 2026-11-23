@@ -204,6 +204,8 @@ def write_vector_3dm(out_path, tin, floors, lines, levels, low_on_left, origin, 
     tin: dict(verts (N,3) CRS, tris); floors: list of (shapely Polygon in CRS, z)."""
     import rhino3dm as r
 
+    import vectormesh as VM
+
     ox, oy = origin
     m = r.File3dm()
     m.Settings.ModelUnitSystem = r.UnitSystem.Meters
@@ -222,10 +224,18 @@ def write_vector_3dm(out_path, tin, floors, lines, levels, low_on_left, origin, 
         t /= np.hypot(t[:, 0], t[:, 1])[:, None] + 1e-12
         nl = np.c_[-t[:, 1], t[:, 0]]
         sl = 1.0 if low_on_left[i] else -1.0
-        for name, q, z in (("crest", loc - nl * sl * gap_m, levels["high"][i]),
-                           ("toe", loc + nl * sl * gap_m, levels["low"][i])):
-            m.Objects.AddCurve(r.PolylineCurve([r.Point3d(float(x), float(y), float(z)) for x, y in q]),
-                               _attrs(r, L_3d, f"bench_line_{i}_{name}_{z:.2f}m"))
+        for name, q, which in (("crest", loc - nl * sl * gap_m, "high"), ("toe", loc + nl * sl * gap_m, "low")):
+            qd = VM._densify(q, 1.0)
+            zz = VM.level_at(levels, i, qd, which)
+            keep = np.r_[True, np.abs(np.diff(zz)) > 1e-3] | np.r_[np.abs(np.diff(zz)) > 1e-3, True]
+            keep[[0, -1]] = True
+            # original vertices plus the points where the level steps
+            pts = np.r_[np.c_[q, VM.level_at(levels, i, q, which)], np.c_[qd[keep], zz[keep]]]
+            order = np.argsort(np.r_[VM._arclen(q) / max(VM._arclen(q)[-1], 1e-9),
+                                     VM._arclen(qd)[keep] / max(VM._arclen(qd)[-1], 1e-9)], kind="stable")
+            pts = pts[order]
+            m.Objects.AddCurve(r.PolylineCurve([r.Point3d(float(x), float(y), float(z)) for x, y, z in pts]),
+                               _attrs(r, L_3d, f"bench_line_{i}_{name}"))
 
     V = tin["verts"] - np.array([ox, oy, 0.0])
     me = r.Mesh()

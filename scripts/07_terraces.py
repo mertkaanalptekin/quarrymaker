@@ -446,12 +446,12 @@ def main(argv=None) -> int:
                                      out_shape=(H, W), transform=tf).astype(bool)
                 zt_vec = VM.raster_from_tin(tin, tf, (H, W), zone, z0)
                 dz_l = (zt_vec - z0).astype("float32")
-                walls_h = lev["high"] - lev["low"]
+                walls_h = lev["walls"]
                 linfo = {"bench_height_m": Hc, "style": "vector",
                          "line_length_km": round(sum(float(np.hypot(*np.diff(a, axis=0).T).sum())
                                                      for a in user_lines) / 1000.0, 1),
                          "wall_height_median_m": round(float(np.median(walls_h)), 2),
-                         "floor_links": lev["n_links"], "shared_floors": int(len(np.unique(lev["groups"]))),
+                         "floor_links": lev["n_links"], "level_steps": lev["n_steps"], "shared_floors": int(len(np.unique(lev["groups"]))),
                          "tin_vertices": int(len(tin["verts"])), "tin_triangles": int(len(tin["tris"])),
                          "mean_dz_m": round(float(dz_l[zone].mean()), 2)}
                 linfo["user_lines"] = {"file": str(tc["user_lines"]), "curves": len(user_lines),
@@ -749,10 +749,22 @@ def main(argv=None) -> int:
     checks.append(("Measured base untouched (hashes before = after)", after == base_hashes,
                    ", ".join(f"{k2} {v[:12]}" for k2, v in after.items())))
     out_zone = feather == 0
+    if trc is not None and trc.get("vector") is not None:
+        out_zone &= ~trc["vector"]["zone"]          # the 40 m zone around your lines is interpreted
     d_out = float(np.abs(dz[out_zone]).max()) if out_zone.any() else 0.0
     checks.append(("Outside the pit, interpreted = measured", d_out == 0.0, f"max |dz| outside {d_out}"))
     mdz = params["dz_in_bench_zone"]["mean"]
-    if trc is not None and trc["info"].get("style") == "carved":
+    if trc is not None and trc.get("vector") is not None:
+        zn = trc["vector"]["zone"]
+        dzv = dz[zn] if zn.any() else np.zeros(1)
+        Hc_ = float(trc["info"].get("bench_height_m") or Hb)
+        share = float((dzv > Hc_).mean())
+        checks.append(("Benches from your lines are cut into the ground (mean change <= 0, fill above H on < 2% of the zone)",
+                       float(dzv.mean()) <= 0.01 and share < 0.02,
+                       f"mean {float(dzv.mean()):+.2f} m, fill above {Hc_:.1f} m on {100 * share:.2f}% "
+                       f"(99th percentile {float(np.percentile(dzv, 99)):+.2f} m, max {float(dzv.max()):+.2f} m), "
+                       f"max cut {float(dzv.min()):+.2f} m"))
+    elif trc is not None and trc["info"].get("style") == "carved":
         dzc = trc["dz"][trc["affected"]] if trc["affected"].any() else np.zeros(1)
         Hc_ = float(trc["info"].get("bench_height_m") or Hb)
         ok_c = -Hc_ <= float(dzc.mean()) <= 0.01 and float(dzc.max()) <= Hc_
